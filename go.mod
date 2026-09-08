@@ -5,6 +5,8 @@ go 1.25.7
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/google/go-containerregistry v0.22.1
+	github.com/vishvananda/netlink v1.3.1
+	golang.org/x/sys v0.47.0
 	modernc.org/sqlite v1.58.0
 )
 
@@ -20,8 +22,8 @@ require (
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
+	github.com/vishvananda/netns v0.0.5 // indirect
 	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
 	gotest.tools/v3 v3.5.2 // indirect
 	modernc.org/libc v1.75.6 // indirect
 	modernc.org/mathutil v1.7.1 // indirect

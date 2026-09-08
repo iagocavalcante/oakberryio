@@ -74,3 +74,28 @@ func TestArgvErrorsWhenBothEmpty(t *testing.T) {
 		t.Fatal("expected error when entrypoint and cmd are both empty")
 	}
 }
+
+func TestMergeEnvOverrideWinsAndSorted(t *testing.T) {
+	imageEnv := []string{"PATH=/usr/bin", "PORT=3000"}
+	override := map[string]string{"PORT": "8080", "SECRET": "x"}
+
+	got := MergeEnv(imageEnv, override)
+	want := []string{"PATH=/usr/bin", "PORT=8080", "SECRET=x"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("MergeEnv = %v, want %v", got, want)
+	}
+}
+
+func TestMergeEnvIgnoresMalformedImageEnv(t *testing.T) {
+	got := MergeEnv([]string{"NOEQUALS"}, map[string]string{"A": "1"})
+	want := []string{"A=1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("MergeEnv = %v, want %v", got, want)
+	}
+}
+
+func TestMergeEnvEmpty(t *testing.T) {
+	if got := MergeEnv(nil, nil); len(got) != 0 {
+		t.Fatalf("MergeEnv(nil, nil) = %v, want empty", got)
+	}
+}

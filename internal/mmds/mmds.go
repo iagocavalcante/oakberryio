@@ -3,7 +3,10 @@
 // the guest.
 package mmds
 
-import "errors"
+import (
+	"errors"
+	"sort"
+)
 
 // Guest is the full payload for one machine, served over MMDS at
 // http://169.254.169.254/.
@@ -37,4 +40,44 @@ func (g Guest) Argv() ([]string, error) {
 	argv = append(argv, g.Entrypoint...)
 	argv = append(argv, g.Cmd...)
 	return argv, nil
+}
+
+// MergeEnv combines an image's baked-in environment with an override map
+// (app config env plus decrypted secrets), override winning on key
+// collisions, and returns the result as a sorted "KEY=VALUE" slice suitable
+// for exec.Cmd.Env. oakd calls this once when building a Guest payload; the
+// guest side (oak-init) just uses Guest.Env as-is.
+func MergeEnv(imageEnv []string, override map[string]string) []string {
+	merged := make(map[string]string, len(imageEnv)+len(override))
+	for _, kv := range imageEnv {
+		key, value, ok := splitEnv(kv)
+		if !ok {
+			continue
+		}
+		merged[key] = value
+	}
+	for k, v := range override {
+		merged[k] = v
+	}
+
+	keys := make([]string, 0, len(merged))
+	for k := range merged {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, k+"="+merged[k])
+	}
+	return out
+}
+
+func splitEnv(kv string) (key, value string, ok bool) {
+	for i := 0; i < len(kv); i++ {
+		if kv[i] == '=' {
+			return kv[:i], kv[i+1:], true
+		}
+	}
+	return "", "", false
 }
