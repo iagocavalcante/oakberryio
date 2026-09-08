@@ -9,7 +9,7 @@ grep -q -E 'svm|vmx' /proc/cpuinfo || { echo "no virtualization flag: enable SVM
 [ -e /dev/kvm ] || { echo "/dev/kvm missing"; exit 1; }
 
 apt-get update
-apt-get install -y curl jq nftables e2fsprogs docker.io age
+apt-get install -y curl jq nftables e2fsprogs docker.io age sqlite3
 
 # firecracker
 if ! command -v firecracker >/dev/null; then

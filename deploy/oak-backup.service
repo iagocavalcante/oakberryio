@@ -1,0 +1,6 @@
+[Unit]
+Description=oakberryio backup (volumes + oak.db snapshot)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/oak-backup.sh
