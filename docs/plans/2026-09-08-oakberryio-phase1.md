@@ -493,3 +493,60 @@ Run it. Fix until green. Commit `feat: systemd units, example app, smoke test`.
 
 ## Done when
 `scripts/smoke.sh` prints `SMOKE OK`, `systemctl restart oakd` brings `hello` back without a redeploy, and `oak deploy` a second time swaps the machine with the old one stopped.
+
+---
+
+### Task 12: Bootable autoinstall USB
+
+**Files:** `scripts/make-usb.sh`, `usb/user-data.tmpl`, `usb/meta-data`, `docs/usb.md`
+
+**Goal:** `make usb DEV=/dev/diskN` on the Mac writes a USB stick that installs Ubuntu Server 24.04 unattended, partitions SSD/HDD per the design, runs `scripts/host-setup.sh`, installs `oakd`/`oak-init`, enables the systemd units, and reboots into a working host. Only manual step left: `cloudflared tunnel login`.
+
+**Step 1: `usb/user-data.tmpl`** (cloud-init autoinstall, rendered by envsubst with `OAK_HOSTNAME`, `OAK_SSH_KEY`, `OAK_DOMAIN`, `OAK_SSD` e.g. `/dev/nvme0n1` or `/dev/sda`, `OAK_HDD`):
+```yaml
+#cloud-config
+autoinstall:
+  version: 1
+  locale: en_US.UTF-8
+  keyboard: {layout: us}
+  identity: {hostname: ${OAK_HOSTNAME}, username: oak, password: "${OAK_PASSWORD_HASH}"}
+  ssh: {install-server: true, allow-pw: false, authorized-keys: ["${OAK_SSH_KEY}"]}
+  storage:
+    config:
+      - {type: disk, id: ssd, path: ${OAK_SSD}, ptable: gpt, wipe: superblock-recursive, grub_device: true}
+      - {type: partition, id: esp, device: ssd, size: 512M, flag: boot}
+      - {type: format, id: esp-fs, volume: esp, fstype: fat32}
+      - {type: partition, id: root, device: ssd, size: -1}
+      - {type: format, id: root-fs, volume: root, fstype: ext4}
+      - {type: mount, id: esp-m, device: esp-fs, path: /boot/efi}
+      - {type: mount, id: root-m, device: root-fs, path: /}
+      - {type: disk, id: hdd, path: ${OAK_HDD}, ptable: gpt, wipe: superblock-recursive}
+      - {type: partition, id: bk, device: hdd, size: -1}
+      - {type: format, id: bk-fs, volume: bk, fstype: ext4}
+      - {type: mount, id: bk-m, device: bk-fs, path: /var/lib/oak/backups}
+  packages: [curl, jq, nftables, e2fsprogs, docker.io, age]
+  late-commands:
+    - cp -r /cdrom/oak /target/opt/oak
+    - curtin in-target -- bash -c 'OAK_DOMAIN=${OAK_DOMAIN} /opt/oak/host-setup.sh'
+    - curtin in-target -- install -m755 /opt/oak/bin/oakd /usr/local/bin/oakd
+    - curtin in-target -- install -m755 /opt/oak/bin/oak-init /usr/local/bin/oak-init
+    - curtin in-target -- install -m644 /opt/oak/oakd.service /etc/systemd/system/oakd.service
+    - curtin in-target -- install -m644 /opt/oak/oak-backup.service /opt/oak/oak-backup.timer /etc/systemd/system/
+    - curtin in-target -- install -m600 /opt/oak/oakd.toml /etc/oak/oakd.toml
+    - curtin in-target -- systemctl enable oakd oak-backup.timer
+```
+`meta-data` is empty. Volumes/images/rootfs dirs live on the SSD root (`/var/lib/oak`), backups mount on the HDD, matching the design.
+
+**Step 2: `scripts/make-usb.sh`** (runs on the Mac, needs `brew install xorriso`):
+1. Download `ubuntu-24.04.x-live-server-amd64.iso` to `build/` if missing, verify SHA256 from the release `SHA256SUMS`.
+2. `make build` → `bin/oakd bin/oak-init` (linux/amd64 static).
+3. Stage `build/oak/`: host-setup.sh, bin/, deploy/*.service, deploy/*.timer, rendered `oakd.toml` (api_token generated with `openssl rand -hex 32`, printed at the end).
+4. Render `user-data` with envsubst; `mkpasswd`-free: require `OAK_PASSWORD_HASH` env (docs show `openssl passwd -6`).
+5. Repack ISO with xorriso: extract, add `autoinstall/{user-data,meta-data}` and `oak/`, patch `boot/grub/grub.cfg` kernel line to append `autoinstall ds=nocloud\;s=/cdrom/autoinstall/`, rebuild as hybrid EFI ISO preserving the original boot images (`-boot_image any replay`).
+6. If `DEV` set: `diskutil unmountDisk $DEV && sudo dd if=build/oak-install.iso of=${DEV/disk/rdisk} bs=4m status=progress`.
+
+**Step 3: `docs/usb.md`**: required env vars, how to find disk paths for the target (boot the stock ISO once or check `lsblk` from a live session), BIOS: enable SVM, UEFI boot from USB, what to expect (install ~10 min, one reboot), then `ssh oak@<ip>`, `cloudflared tunnel login && cloudflared tunnel create oak`, put the tunnel id in `/etc/oak/oakd.toml`, `systemctl restart oakd`.
+
+**Test:** no unit test. Verified by installing the real box from the stick and running `scripts/smoke.sh`. Commit `feat: autoinstall usb builder`.
+
+**Skipped:** custom minimal distro, netboot, Secure Boot signing. Add when a second box makes reinstalls frequent.
