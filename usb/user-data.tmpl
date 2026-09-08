@@ -1,0 +1,31 @@
+#cloud-config
+autoinstall:
+  version: 1
+  locale: en_US.UTF-8
+  keyboard: {layout: us}
+  identity: {hostname: ${OAK_HOSTNAME}, username: oak, password: "${OAK_PASSWORD_HASH}"}
+  ssh: {install-server: true, allow-pw: false, authorized-keys: ["${OAK_SSH_KEY}"]}
+  storage:
+    config:
+      - {type: disk, id: ssd, path: ${OAK_SSD}, ptable: gpt, wipe: superblock-recursive, grub_device: true}
+      - {type: partition, id: esp, device: ssd, size: 512M, flag: boot}
+      - {type: format, id: esp-fs, volume: esp, fstype: fat32}
+      - {type: partition, id: root, device: ssd, size: -1}
+      - {type: format, id: root-fs, volume: root, fstype: ext4}
+      - {type: mount, id: esp-m, device: esp-fs, path: /boot/efi}
+      - {type: mount, id: root-m, device: root-fs, path: /}
+      - {type: disk, id: hdd, path: ${OAK_HDD}, ptable: gpt, wipe: superblock-recursive}
+      - {type: partition, id: bk, device: hdd, size: -1}
+      - {type: format, id: bk-fs, volume: bk, fstype: ext4}
+      - {type: mount, id: bk-m, device: bk-fs, path: /var/lib/oak/backups}
+  packages: [curl, jq, nftables, e2fsprogs, docker.io, age, sqlite3]
+  late-commands:
+    - cp -r /cdrom/oak /target/opt/oak
+    - curtin in-target -- bash -c 'OAK_DOMAIN=${OAK_DOMAIN} /opt/oak/host-setup.sh'
+    - curtin in-target -- install -m755 /opt/oak/bin/oakd /usr/local/bin/oakd
+    - curtin in-target -- install -m755 /opt/oak/bin/oak-init /usr/local/bin/oak-init
+    - curtin in-target -- install -m755 /opt/oak/backup.sh /usr/local/bin/oak-backup.sh
+    - curtin in-target -- install -m644 /opt/oak/oakd.service /etc/systemd/system/oakd.service
+    - curtin in-target -- install -m644 /opt/oak/oak-backup.service /opt/oak/oak-backup.timer /etc/systemd/system/
+    - curtin in-target -- install -m600 /opt/oak/oakd.toml /etc/oak/oakd.toml
+    - curtin in-target -- systemctl enable oakd oak-backup.timer

@@ -1,0 +1,3 @@
+# Intentionally minimal: NoCloud only really consults instance-id, and this
+# ISO is built fresh per install rather than reused across boots.
+instance-id: oak
