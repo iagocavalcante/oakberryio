@@ -34,6 +34,28 @@ cloudflared tunnel create oak
 `~/.cloudflared/<tunnel-id>.json` (as root, `/root/.cloudflared/`). Note the
 tunnel ID — it goes in `/etc/oak/oakd.toml` (`tunnel_id`).
 
+Then install `cloudflared` as a systemd service reading the config file
+`oakd` rewrites on every deploy (`tunnel_config` in `oakd.toml`, default
+`/etc/cloudflared/config.yml`):
+
+```bash
+mkdir -p /etc/cloudflared
+cat >/etc/cloudflared/config.yml <<EOF
+tunnel: <tunnel-id>
+credentials-file: /root/.cloudflared/<tunnel-id>.json
+ingress:
+  - service: http_status:404
+EOF
+cloudflared service install
+systemctl enable --now cloudflared
+```
+
+`cloudflared service install` writes its own unit from the package, so
+there's no `deploy/cloudflared.service` in this repo. `oakd` overwrites
+`/etc/cloudflared/config.yml`'s `ingress:` list on every deploy and restarts
+the service (see `internal/tunnel`); the placeholder ingress above is just
+enough for the service to start before the first deploy.
+
 ## 4. Point DNS at the tunnel
 
 In the Cloudflare dashboard for the zone backing `OAK_DOMAIN`, add a wildcard
