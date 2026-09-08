@@ -61,6 +61,41 @@ func (s *Store) UpsertApp(name, configJSON string) error {
 	return nil
 }
 
+// Apps lists every registered app name, sorted.
+func (s *Store) Apps() ([]string, error) {
+	rows, err := s.db.Query(`SELECT name FROM apps ORDER BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("list apps: %w", err)
+	}
+	defer rows.Close()
+
+	var apps []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("scan app: %w", err)
+		}
+		apps = append(apps, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate apps: %w", err)
+	}
+	return apps, nil
+}
+
+// AppConfig returns the config most recently stored for app by UpsertApp.
+func (s *Store) AppConfig(name string) (string, error) {
+	var config string
+	err := s.db.QueryRow(`SELECT config FROM apps WHERE name = ?`, name).Scan(&config)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", fmt.Errorf("app config for %s: not found", name)
+		}
+		return "", fmt.Errorf("app config for %s: %w", name, err)
+	}
+	return config, nil
+}
+
 // InsertRelease records a new release for app and returns its id.
 func (s *Store) InsertRelease(app, image, rootfs, cmdJSON, envJSON, workdir string) (int64, error) {
 	res, err := s.db.Exec(
@@ -268,6 +303,37 @@ func (s *Store) Secrets(app string) (map[string][]byte, error) {
 		return nil, fmt.Errorf("iterate secrets: %w", err)
 	}
 	return secrets, nil
+}
+
+// Release is a row from the releases table.
+type Release struct {
+	ID        int64
+	App       string
+	Image     string
+	RootFS    string
+	NodeID    string
+	Cmd       string
+	Env       string
+	Workdir   string
+	CreatedAt string
+}
+
+// ReleaseByID looks up a single release, e.g. to rebuild a machine's VM spec
+// during the daemon's startup reconcile.
+func (s *Store) ReleaseByID(id int64) (Release, error) {
+	var r Release
+	err := s.db.QueryRow(
+		`SELECT id, app, image, rootfs, node_id, cmd, env, workdir, created_at
+		 FROM releases WHERE id = ?`,
+		id,
+	).Scan(&r.ID, &r.App, &r.Image, &r.RootFS, &r.NodeID, &r.Cmd, &r.Env, &r.Workdir, &r.CreatedAt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return Release{}, fmt.Errorf("release %d: not found", id)
+		}
+		return Release{}, fmt.Errorf("release %d: %w", id, err)
+	}
+	return r, nil
 }
 
 // Volume is a row from the volumes table.

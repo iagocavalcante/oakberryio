@@ -185,6 +185,64 @@ func TestSecretsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestAppsListsRegisteredApps(t *testing.T) {
+	s := openTemp(t)
+	if err := s.UpsertApp("b", "{}"); err != nil {
+		t.Fatalf("upsert app: %v", err)
+	}
+	if err := s.UpsertApp("a", "{}"); err != nil {
+		t.Fatalf("upsert app: %v", err)
+	}
+	apps, err := s.Apps()
+	if err != nil {
+		t.Fatalf("apps: %v", err)
+	}
+	if len(apps) != 2 || apps[0] != "a" || apps[1] != "b" {
+		t.Fatalf("apps = %v, want [a b]", apps)
+	}
+}
+
+func TestAppConfigRoundTrip(t *testing.T) {
+	s := openTemp(t)
+	if err := s.UpsertApp("a", `{"app":"a"}`); err != nil {
+		t.Fatalf("upsert app: %v", err)
+	}
+	if err := s.UpsertApp("a", `{"app":"a","image":"img:2"}`); err != nil {
+		t.Fatalf("upsert app: %v", err)
+	}
+	config, err := s.AppConfig("a")
+	if err != nil {
+		t.Fatalf("app config: %v", err)
+	}
+	if config != `{"app":"a","image":"img:2"}` {
+		t.Fatalf("config = %q, want the latest upsert", config)
+	}
+	if _, err := s.AppConfig("missing"); err == nil {
+		t.Fatal("want error for unknown app")
+	}
+}
+
+func TestReleaseByID(t *testing.T) {
+	s := openTemp(t)
+	if err := s.UpsertApp("a", "{}"); err != nil {
+		t.Fatalf("upsert app: %v", err)
+	}
+	relID, err := s.InsertRelease("a", "img:1", "/rootfs/a-1.ext4", `["/bin/app"]`, `["FOO=1"]`, "/app")
+	if err != nil {
+		t.Fatalf("insert release: %v", err)
+	}
+	rel, err := s.ReleaseByID(relID)
+	if err != nil {
+		t.Fatalf("release by id: %v", err)
+	}
+	if rel.App != "a" || rel.Image != "img:1" || rel.RootFS != "/rootfs/a-1.ext4" || rel.Workdir != "/app" {
+		t.Fatalf("release = %+v", rel)
+	}
+	if _, err := s.ReleaseByID(relID + 1); err == nil {
+		t.Fatal("want error for unknown release id")
+	}
+}
+
 func TestVolumesRoundTrip(t *testing.T) {
 	s := openTemp(t)
 	if err := s.UpsertApp("a", "{}"); err != nil {

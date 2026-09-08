@@ -3,6 +3,7 @@ module github.com/iagocavalcante/oakberryio
 go 1.25.7
 
 require (
+	filippo.io/age v1.3.2
 	github.com/BurntSushi/toml v1.6.0
 	github.com/firecracker-microvm/firecracker-go-sdk v1.0.0
 	github.com/google/go-containerregistry v0.22.1
@@ -13,7 +14,6 @@ require (
 )
 
 require (
-	filippo.io/age v1.3.2 // indirect
 	filippo.io/hpke v0.4.0 // indirect
 	github.com/PuerkitoBio/purell v1.1.1 // indirect
 	github.com/PuerkitoBio/urlesc v0.0.0-20170810143723-de5bf2ad4578 // indirect

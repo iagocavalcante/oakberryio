@@ -56,8 +56,16 @@ registry = "localhost:5000"
 domain = "apps.example.com"
 tunnel_id = "uuid"
 tunnel_config = "/etc/cloudflared/config.yml"
+tunnel_creds = "/root/.cloudflared/uuid.json"
 key_file = "/etc/oak/key"
 socket = "/run/oak.sock"
+log_dir = "/var/log/oak"
+# api_token is required on every request to oakd's TCP listener
+# (127.0.0.1:api_port, tunneled as oak.<domain>) as "Authorization: Bearer
+# <api_token>"; the unix socket at `socket` needs no token since it's
+# trusted local access. Generate one with `openssl rand -hex 32`.
+api_token = "change-me"
+api_port = 7000
 ```
 
 ## 6. Pushing images from the Mac
