@@ -40,15 +40,18 @@ func (FirecrackerRuntime) BuildRootfs(ctx context.Context, image, out string) (*
 		return nil, fmt.Errorf("flatten %s: %w", image, err)
 	}
 
-	sizeMB, err := rootfsSizeMB(scratch)
+	sizeMB, fileCount, err := rootfsSizeMB(scratch)
 	if err != nil {
 		return nil, fmt.Errorf("size %s: %w", scratch, err)
 	}
+	// Headroom over the exact file count: the guest may create new files at
+	// runtime (logs, temp files), and ext4 can't add inodes after mkfs.
+	inodeCount := fileCount*2 + 1024
 
 	if err := os.MkdirAll(filepath.Dir(out), 0755); err != nil {
 		return nil, fmt.Errorf("mkdir %s: %w", filepath.Dir(out), err)
 	}
-	if err := rootfs.MakeExt4(scratch, out, sizeMB); err != nil {
+	if err := rootfs.MakeExt4(scratch, out, sizeMB, inodeCount); err != nil {
 		return nil, fmt.Errorf("mkfs %s: %w", out, err)
 	}
 	return meta, nil

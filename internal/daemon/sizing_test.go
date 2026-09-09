@@ -45,12 +45,16 @@ func TestRootfsSizeMBSumsRegularFiles(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 
-	got, err := rootfsSizeMB(dir)
+	gotMB, gotFiles, err := rootfsSizeMB(dir)
 	if err != nil {
 		t.Fatalf("rootfsSizeMB: %v", err)
 	}
 	// 15 MB of regular files + 256 headroom = 271, rounded up to 320.
-	if got != 320 {
-		t.Fatalf("rootfsSizeMB = %d, want 320", got)
+	if gotMB != 320 {
+		t.Fatalf("rootfsSizeMB size = %d, want 320", gotMB)
+	}
+	// "a" and "b" are regular files; "link" is a symlink and must not count.
+	if gotFiles != 2 {
+		t.Fatalf("rootfsSizeMB fileCount = %d, want 2", gotFiles)
 	}
 }
