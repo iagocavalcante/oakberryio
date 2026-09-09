@@ -27,8 +27,8 @@ autoinstall:
     - curtin in-target -- install -m644 /opt/oak/oakd.service /etc/systemd/system/oakd.service
     - curtin in-target -- install -m644 /opt/oak/oak-backup.service /opt/oak/oak-backup.timer /etc/systemd/system/
     - curtin in-target -- install -m644 /opt/oak/oak-firstboot.service /etc/systemd/system/oak-firstboot.service
-    - curtin in-target -- install -m600 /opt/oak/oakd.toml /etc/oak/oakd.toml
     - curtin in-target -- mkdir -p /etc/oak
+    - curtin in-target -- install -m600 /opt/oak/oakd.toml /etc/oak/oakd.toml
     - curtin in-target -- bash -c 'echo "OAK_DOMAIN=${OAK_DOMAIN}" > /etc/oak/firstboot.env'
     - curtin in-target -- chmod 600 /etc/oak/firstboot.env
     - curtin in-target -- systemctl enable oakd oak-backup.timer oak-firstboot.service

@@ -77,6 +77,32 @@ systemctl enable --now nftables
 sysctl -w net.ipv4.ip_forward=1
 echo 'net.ipv4.ip_forward=1' >/etc/sysctl.d/99-oak.conf
 
+# Docker's own FORWARD chain policy is DROP, and in nftables an `accept`
+# verdict only ends traversal of the chain it's in -- oak's forward chain
+# above does not stop the packet from also hitting docker's DROP policy in
+# `ip filter FORWARD`. Docker's supported extension point for exactly this
+# is its DOCKER-USER chain, which it always jumps to first from FORWARD and
+# never overwrites once populated. Docker does, however, recreate
+# DOCKER-USER empty every time it starts, so the rule has to be reapplied on
+# every docker.service start, not just once here.
+cat >/usr/local/bin/oak-docker-user-rules.sh <<'N'
+#!/usr/bin/env bash
+set -euo pipefail
+iptables -C DOCKER-USER -i oak0 -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER -i oak0 -j ACCEPT
+iptables -C DOCKER-USER -o oak0 -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER -o oak0 -j ACCEPT
+N
+chmod 755 /usr/local/bin/oak-docker-user-rules.sh
+mkdir -p /etc/systemd/system/docker.service.d
+cat >/etc/systemd/system/docker.service.d/10-oak-user-chain.conf <<'N'
+[Service]
+ExecStartPost=/usr/local/bin/oak-docker-user-rules.sh
+N
+systemctl daemon-reload
+# Apply immediately too, in case docker is already running and won't be
+# restarted by this script (the drop-in only fires on docker's own future
+# starts).
+/usr/local/bin/oak-docker-user-rules.sh
+
 # local registry
 docker ps -q -f name=oak-registry | grep -q . || \
   docker run -d --restart=always --name oak-registry -p 127.0.0.1:5000:5000 -v /var/lib/oak/registry:/var/lib/registry registry:2

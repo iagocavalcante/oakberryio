@@ -399,7 +399,7 @@ func TestDeployStartCtxSurvivesRequestCancellation(t *testing.T) {
 
 // --- watchMachine: reap an unexpectedly-exited machine ----------------------
 
-func TestWatchMachineMarksStoppedWhenProcessExits(t *testing.T) {
+func TestWatchMachineDeletesRowWhenProcessExits(t *testing.T) {
 	waitCh := make(chan error, 1)
 	rt := &fakeRuntime{waitCh: waitCh}
 	d := testDeployer(t, rt, &fakeChecker{healthy: true})
@@ -412,17 +412,18 @@ func TestWatchMachineMarksStoppedWhenProcessExits(t *testing.T) {
 
 	close(waitCh)
 
+	// watchMachine deletes the row outright rather than leaving it
+	// "stopped": this design only ever holds an IP against a live "running"
+	// row (see stopOldMachines/Deploy's own failure-cleanup paths), so a
+	// lingering "stopped" row would leak both the row and its IP on every
+	// unexpected exit.
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		m, err := d.Store.Machine(id)
-		if err != nil {
-			t.Fatalf("machine: %v", err)
-		}
-		if m.State == "stopped" {
+		if _, err := d.Store.Machine(id); err != nil {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("machine %s never marked stopped, state=%s", id, m.State)
+			t.Fatalf("machine %s row never deleted after exit", id)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}

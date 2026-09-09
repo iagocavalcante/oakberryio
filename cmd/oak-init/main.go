@@ -75,6 +75,9 @@ func run() error {
 	if err := linkUp("eth0"); err != nil {
 		return fmt.Errorf("eth0 up: %w", err)
 	}
+	if err := ensureFallbackAddr(); err != nil {
+		return fmt.Errorf("ensure fallback addr: %w", err)
+	}
 	if err := routeToMMDS(); err != nil {
 		return fmt.Errorf("route to mmds: %w", err)
 	}
@@ -170,6 +173,37 @@ func linkUp(name string) error {
 	}
 	if err := netlink.LinkSetUp(link); err != nil {
 		return fmt.Errorf("set %s up: %w", name, err)
+	}
+	return nil
+}
+
+// ensureFallbackAddr gives eth0 a temporary link-local address if it doesn't
+// already have one. oakd's kernel "ip=" boot parameter (see BuildConfig)
+// should have already configured eth0's real address by this point; this is
+// defense-in-depth for a guest kernel built without IP-PNP autoconfiguration
+// support. Without any address at all, an outgoing packet's source is
+// 0.0.0.0, which Firecracker's MMDS endpoint silently drops -- exactly the
+// original race this whole IP-configuration chain exists to close. The
+// address is harmless to leave in place once configureAddr adds the real
+// one from MMDS: Linux interfaces carry multiple addresses fine.
+func ensureFallbackAddr() error {
+	link, err := netlink.LinkByName("eth0")
+	if err != nil {
+		return fmt.Errorf("eth0: %w", err)
+	}
+	addrs, err := netlink.AddrList(link, netlink.FAMILY_V4)
+	if err != nil {
+		return fmt.Errorf("list eth0 addrs: %w", err)
+	}
+	if len(addrs) > 0 {
+		return nil
+	}
+	addr, err := netlink.ParseAddr("169.254.0.2/16")
+	if err != nil {
+		return fmt.Errorf("parse fallback addr: %w", err)
+	}
+	if err := netlink.AddrAdd(link, addr); err != nil && !errors.Is(err, syscall.EEXIST) {
+		return fmt.Errorf("add fallback addr: %w", err)
 	}
 	return nil
 }

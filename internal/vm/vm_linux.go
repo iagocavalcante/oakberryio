@@ -22,6 +22,13 @@ type Machine struct {
 	fc      *firecracker.Machine
 	tap     netlink.Link
 	logFile *os.File
+	// pid is cached at boot time. firecracker-go-sdk's own Machine.PID
+	// returns an error once its exit channel is closed (i.e. after the
+	// process has exited), which would make PID() below start returning 0
+	// right when callers most need it -- e.g. the daemon's watchMachine
+	// goroutine compares PID() against the store's row *after* Wait
+	// returns, precisely when the SDK's own PID() has gone stale.
+	pid int
 }
 
 // Start creates spec.Tap on bridge oak0, boots a Firecracker microVM per
@@ -124,16 +131,20 @@ func startMachine(ctx context.Context, spec Spec, meta mmds.Guest, tap netlink.L
 		return nil, fmt.Errorf("start machine: %w", err)
 	}
 
-	return &Machine{fc: fcMachine, tap: tap, logFile: logFile}, nil
+	// Cache the PID now, while the process is definitely still running --
+	// see the pid field's doc comment for why this can't just be read from
+	// the SDK on demand.
+	pid, _ := fcMachine.PID()
+
+	return &Machine{fc: fcMachine, tap: tap, logFile: logFile, pid: pid}, nil
 }
 
 // PID returns the Firecracker VMM process's host PID, or 0 if unavailable.
+// It is cached from boot time (see the pid field), not re-queried from the
+// SDK, precisely because it must still report the right value after the
+// process has exited.
 func (m *Machine) PID() int {
-	pid, err := m.fc.PID()
-	if err != nil {
-		return 0
-	}
-	return pid
+	return m.pid
 }
 
 // Stop asks the guest to shut down cleanly (Ctrl-Alt-Del, which the kernel

@@ -17,28 +17,31 @@ const (
 // rootfsSizeMB walks dir (a flattened OCI image tree) and returns the ext4
 // image size to allocate for it (total regular-file bytes, converted to MB,
 // plus rootfsHeadroomMB, rounded up to the next multiple of rootfsRoundMB)
-// alongside the number of regular files found, which the caller uses to
-// size mkfs.ext4's inode count.
-func rootfsSizeMB(dir string) (sizeMB int, fileCount int, err error) {
+// alongside the total number of filesystem entries found (regular files,
+// directories and symlinks alike -- every one of them costs an inode), which
+// the caller uses to size mkfs.ext4's inode count. Only regular-file bytes
+// count toward the size, since directories and symlinks take negligible
+// space but still need their own inode.
+func rootfsSizeMB(dir string) (sizeMB int, entryCount int, err error) {
 	var totalBytes int64
 	walkErr := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
+		entryCount++
 		if d.Type().IsRegular() {
 			info, err := d.Info()
 			if err != nil {
 				return err
 			}
 			totalBytes += info.Size()
-			fileCount++
 		}
 		return nil
 	})
 	if walkErr != nil {
 		return 0, 0, fmt.Errorf("walk %s: %w", dir, walkErr)
 	}
-	return bytesToRoundedMB(totalBytes), fileCount, nil
+	return bytesToRoundedMB(totalBytes), entryCount, nil
 }
 
 // bytesToRoundedMB converts a byte count to whole megabytes (rounded up),

@@ -108,6 +108,17 @@ type Deployer struct {
 	mu         sync.Mutex
 	handles    map[string]Handle
 	appConfigs map[string]*appconfig.Config
+
+	// tunnelMu serializes applyTunnel end to end (read running machines,
+	// render, write the file, restart cloudflared). Deploy, Reconcile and
+	// watchMachine (from its own goroutine, on any machine's exit) can all
+	// call it concurrently; without this, two callers' writeAtomic calls
+	// race on the same "<path>.tmp" and two "systemctl restart cloudflared"
+	// runs race with each other. Deliberately a separate lock from mu:
+	// applyTunnel calls appConfig, which takes mu itself, and holding one
+	// lock while blocking to acquire the other would risk deadlock if any
+	// future caller ever took them in the opposite order.
+	tunnelMu sync.Mutex
 }
 
 // Deploy runs one deploy of image for the app described by cfg: it builds
@@ -305,6 +316,16 @@ func (d *Deployer) watchMachine(id string, handle Handle) {
 		log.Printf("oakd: mark machine %s stopped after exit: %v", id, err)
 	}
 	d.removeHandle(id)
+	// Delete the row outright rather than leaving it "stopped": this design
+	// only ever holds an IP against a live "running" row (see
+	// stopOldMachines/Deploy's failure-cleanup paths, which do the same
+	// SetMachineState-then-DeleteMachine sequence), so leaving a "stopped"
+	// row behind would leak both the row and its IP on every unexpected
+	// exit. SetMachineState above still runs first so the transition is
+	// visible to anything racing to read the row in between.
+	if err := d.Store.DeleteMachine(id); err != nil {
+		log.Printf("oakd: delete machine %s after exit: %v", id, err)
+	}
 	if err := d.applyTunnel(context.WithoutCancel(d.baseCtx())); err != nil {
 		log.Printf("oakd: re-apply tunnel after machine %s exited: %v", id, err)
 	}
@@ -474,6 +495,8 @@ func (d *Deployer) applyTunnel(ctx context.Context) error {
 	if d.TunnelID == "" || d.TunnelConfig == "" {
 		return nil
 	}
+	d.tunnelMu.Lock()
+	defer d.tunnelMu.Unlock()
 
 	machines, err := d.Store.RunningMachines()
 	if err != nil {
