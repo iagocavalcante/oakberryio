@@ -80,7 +80,7 @@ func (s *Server) resolveLocal(w dns.ResponseWriter, r *dns.Msg, q dns.Question) 
 		return
 	}
 
-	app := strings.TrimSuffix(q.Name, zone)
+	app := strings.TrimSuffix(strings.ToLower(q.Name), zone)
 	ips := s.Resolve(app)
 	if len(ips) == 0 {
 		reply.SetRcode(r, dns.RcodeNameError)
