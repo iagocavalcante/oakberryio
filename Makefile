@@ -22,7 +22,8 @@ install: build
 		sudo install -m644 /tmp/oak-deploy/*.service /tmp/oak-deploy/*.timer /etc/systemd/system/ && \
 		sudo systemctl daemon-reload && \
 		sudo systemctl restart oakd && \
-		sudo systemctl enable --now oak-backup.timer'
+		sudo systemctl enable --now oak-backup.timer && \
+		sudo systemctl enable --now oak-docker-forward.service'
 
 test:
 	go test ./...

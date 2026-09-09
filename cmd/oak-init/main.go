@@ -191,33 +191,55 @@ func linkUp(name string) error {
 	return nil
 }
 
+// fallbackAddr is a throwaway link-local address, temporarily assigned to
+// eth0 by ensureFallbackAddr only when it has no address at all yet.
+const fallbackAddr = "169.254.0.2/16"
+
 // ensureFallbackAddr gives eth0 a temporary link-local address if it doesn't
-// already have one. oakd's kernel "ip=" boot parameter (see BuildConfig)
-// should have already configured eth0's real address by this point; this is
-// defense-in-depth for a guest kernel built without IP-PNP autoconfiguration
-// support. Without any address at all, an outgoing packet's source is
-// 0.0.0.0, which Firecracker's MMDS endpoint silently drops -- exactly the
-// original race this whole IP-configuration chain exists to close. The
-// address is harmless to leave in place once configureAddr adds the real
-// one from MMDS: Linux interfaces carry multiple addresses fine.
-func ensureFallbackAddr() error {
+// already have one, reporting whether it added one so run() can remove it
+// again once the real payload address is in place. oakd's kernel "ip="
+// boot parameter (see BuildConfig) should have already configured eth0's
+// real address by this point; this is defense-in-depth for a guest kernel
+// built without IP-PNP autoconfiguration support. Without any address at
+// all, an outgoing packet's source is 0.0.0.0, which Firecracker's MMDS
+// endpoint silently drops -- exactly the original race this whole
+// IP-configuration chain exists to close.
+func ensureFallbackAddr() (added bool, err error) {
+	link, err := netlink.LinkByName("eth0")
+	if err != nil {
+		return false, fmt.Errorf("eth0: %w", err)
+	}
+	addrs, err := netlink.AddrList(link, netlink.FAMILY_V4)
+	if err != nil {
+		return false, fmt.Errorf("list eth0 addrs: %w", err)
+	}
+	if len(addrs) > 0 {
+		return false, nil
+	}
+	addr, err := netlink.ParseAddr(fallbackAddr)
+	if err != nil {
+		return false, fmt.Errorf("parse fallback addr: %w", err)
+	}
+	if err := netlink.AddrAdd(link, addr); err != nil && !errors.Is(err, syscall.EEXIST) {
+		return false, fmt.Errorf("add fallback addr: %w", err)
+	}
+	return true, nil
+}
+
+// removeFallbackAddr undoes ensureFallbackAddr once the real payload address
+// from MMDS is in place, so eth0 doesn't carry a spurious extra address for
+// the rest of the guest's life.
+func removeFallbackAddr() error {
 	link, err := netlink.LinkByName("eth0")
 	if err != nil {
 		return fmt.Errorf("eth0: %w", err)
 	}
-	addrs, err := netlink.AddrList(link, netlink.FAMILY_V4)
-	if err != nil {
-		return fmt.Errorf("list eth0 addrs: %w", err)
-	}
-	if len(addrs) > 0 {
-		return nil
-	}
-	addr, err := netlink.ParseAddr("169.254.0.2/16")
+	addr, err := netlink.ParseAddr(fallbackAddr)
 	if err != nil {
 		return fmt.Errorf("parse fallback addr: %w", err)
 	}
-	if err := netlink.AddrAdd(link, addr); err != nil && !errors.Is(err, syscall.EEXIST) {
-		return fmt.Errorf("add fallback addr: %w", err)
+	if err := netlink.AddrDel(link, addr); err != nil && !errors.Is(err, syscall.EADDRNOTAVAIL) {
+		return fmt.Errorf("remove fallback addr: %w", err)
 	}
 	return nil
 }

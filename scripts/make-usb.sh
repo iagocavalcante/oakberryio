@@ -69,6 +69,7 @@ cp "${ROOT}/deploy/oakd.service" "$stage/"
 cp "${ROOT}/deploy/oak-backup.service" "$stage/"
 cp "${ROOT}/deploy/oak-backup.timer" "$stage/"
 cp "${ROOT}/deploy/oak-firstboot.service" "$stage/"
+cp "${ROOT}/deploy/oak-docker-forward.service" "$stage/"
 
 api_token="$(openssl rand -hex 32)"
 cat >"${stage}/oakd.toml" <<EOF
