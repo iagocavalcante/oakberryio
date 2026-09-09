@@ -7,14 +7,14 @@ autoinstall:
   ssh: {install-server: true, allow-pw: false, authorized-keys: ["${OAK_SSH_KEY}"]}
   storage:
     config:
-      - {type: disk, id: ssd, path: ${OAK_SSD}, ptable: gpt, wipe: superblock-recursive}
+      - {type: disk, id: ssd, match: {ssd: true, size: largest}, ptable: gpt, wipe: superblock-recursive}
       - {type: partition, id: esp, device: ssd, size: 512M, flag: boot, grub_device: true}
       - {type: format, id: esp-fs, volume: esp, fstype: fat32}
       - {type: partition, id: root, device: ssd, size: -1}
       - {type: format, id: root-fs, volume: root, fstype: ext4}
       - {type: mount, id: esp-m, device: esp-fs, path: /boot/efi}
       - {type: mount, id: root-m, device: root-fs, path: /}
-      - {type: disk, id: hdd, path: ${OAK_HDD}, ptable: gpt, wipe: superblock-recursive}
+      - {type: disk, id: hdd, match: {ssd: false, size: largest}, ptable: gpt, wipe: superblock-recursive}
       - {type: partition, id: bk, device: hdd, size: -1}
       - {type: format, id: bk-fs, volume: bk, fstype: ext4}
       - {type: mount, id: bk-m, device: bk-fs, path: /var/lib/oak/backups}

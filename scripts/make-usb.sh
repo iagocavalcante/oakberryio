@@ -7,8 +7,6 @@
 #   OAK_HOSTNAME       box hostname, e.g. oak
 #   OAK_SSH_KEY        one public key line, e.g. "$(cat ~/.ssh/id_ed25519.pub)"
 #   OAK_DOMAIN         apps domain, e.g. apps.example.com
-#   OAK_SSD            install target disk, e.g. /dev/nvme0n1 or /dev/sda
-#   OAK_HDD            backups disk, e.g. /dev/sdb
 #   OAK_PASSWORD_HASH  `openssl passwd -6` output for the `oak` user
 # Optional env:
 #   DEV                macOS disk to write the finished ISO to, e.g.
@@ -20,8 +18,6 @@ set -euo pipefail
 : "${OAK_HOSTNAME:?set OAK_HOSTNAME}"
 : "${OAK_SSH_KEY:?set OAK_SSH_KEY}"
 : "${OAK_DOMAIN:?set OAK_DOMAIN}"
-: "${OAK_SSD:?set OAK_SSD}"
-: "${OAK_HDD:?set OAK_HDD}"
 : "${OAK_PASSWORD_HASH:?set OAK_PASSWORD_HASH}"
 
 UBUNTU_VERSION="${OAK_UBUNTU_VERSION:-24.04.1}"
@@ -89,8 +85,8 @@ echo "make-usb: 4/6 rendering autoinstall/user-data"
 autoinstall="${BUILD}/autoinstall"
 rm -rf "$autoinstall"
 mkdir -p "$autoinstall"
-export OAK_HOSTNAME OAK_SSH_KEY OAK_DOMAIN OAK_SSD OAK_HDD OAK_PASSWORD_HASH
-envsubst '${OAK_HOSTNAME} ${OAK_SSH_KEY} ${OAK_DOMAIN} ${OAK_SSD} ${OAK_HDD} ${OAK_PASSWORD_HASH}' \
+export OAK_HOSTNAME OAK_SSH_KEY OAK_DOMAIN OAK_PASSWORD_HASH
+envsubst '${OAK_HOSTNAME} ${OAK_SSH_KEY} ${OAK_DOMAIN} ${OAK_PASSWORD_HASH}' \
 	<"${ROOT}/usb/user-data.tmpl" >"${autoinstall}/user-data"
 cp "${ROOT}/usb/meta-data" "${autoinstall}/meta-data"
 

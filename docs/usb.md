@@ -26,23 +26,19 @@ brew install xorriso coreutils gettext
 | `OAK_HOSTNAME` | `oak` | box hostname |
 | `OAK_SSH_KEY` | `$(cat ~/.ssh/id_ed25519.pub)` | one public key line, quoted |
 | `OAK_DOMAIN` | `apps.example.com` | apps domain (see docs/host.md) |
-| `OAK_SSD` | `/dev/nvme0n1` | install target: OS + `/var/lib/oak` |
-| `OAK_HDD` | `/dev/sdb` | backups target: `/var/lib/oak/backups` |
 | `OAK_PASSWORD_HASH` | `$(openssl passwd -6)` | hashed password for the `oak` user |
 
 Optional: `OAK_UBUNTU_VERSION` (default `24.04.1`), `DEV` (a macOS disk
 identifier -- see below; the script never touches a disk unless this is
 set).
 
-## Finding the target's disk paths
+## Disk selection
 
-`OAK_SSD`/`OAK_HDD` are Linux device paths *on the box being installed*, not
-on the Mac. If you don't already know them:
-
-1. Boot the target once from a stock Ubuntu Server ISO (or any Linux live
-   USB) and run `lsblk` to see `/dev/nvme0n1`, `/dev/sda`, etc.
-2. Or, since this is a fresh box: NVMe drives are almost always
-   `/dev/nvme0n1`; the one spinning HDD is almost always `/dev/sda`.
+Disks are picked automatically by curtin match rules, so no device paths
+are needed: the largest SSD becomes the install target (EFI + root +
+`/var/lib/oak`), the largest spinning disk becomes `/var/lib/oak/backups`.
+The install USB is smaller than the SSD, so it never matches. Both disks
+are wiped.
 
 ## Building the ISO
 
@@ -50,8 +46,6 @@ on the Mac. If you don't already know them:
 export OAK_HOSTNAME=oak
 export OAK_SSH_KEY="$(cat ~/.ssh/id_ed25519.pub)"
 export OAK_DOMAIN=apps.example.com
-export OAK_SSD=/dev/nvme0n1
-export OAK_HDD=/dev/sda
 export OAK_PASSWORD_HASH="$(openssl passwd -6)"
 
 make usb
@@ -104,11 +98,11 @@ this is destructive to whatever is on that disk.
 1. Enable **SVM** (AMD) or **VT-x/VMX** (Intel) in BIOS/UEFI -- required for
    Firecracker later (see docs/host.md #1).
 2. Boot from the USB stick in **UEFI mode, not legacy/CSM**. The install
-   partitions an EFI system partition on `OAK_SSD` and grub is installed
+   partitions an EFI system partition on the SSD and grub is installed
    against that ESP (see `usb/user-data.tmpl`'s `grub_device: true`) -- a
    legacy/CSM boot won't find a GPT+ESP layout to boot from afterward.
 3. The install itself is unattended: expect ~10 minutes and one reboot. It
-   partitions `OAK_SSD` (EFI + root, mounted at `/`) and `OAK_HDD` (mounted
+   partitions the SSD (EFI + root, mounted at `/`) and the HDD (mounted
    at `/var/lib/oak/backups`), and stages `oakd`/`oak-init`/`oak-backup.sh`
    plus their systemd units (`oakd`, `oak-backup.timer`, `oak-firstboot`),
    enabled but not yet run.
