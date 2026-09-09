@@ -124,7 +124,20 @@ const (
 // tens of thousands of machines, revisit with a free-list if it shows up in
 // profiles.
 func (s *Store) AllocIP() (string, error) {
-	rows, err := s.db.Query(`SELECT ip FROM machines`)
+	return allocIP(s.db)
+}
+
+// dbExecer is satisfied by both *sql.DB and *sql.Tx, so allocIP and
+// insertMachine can run either standalone (existing callers, existing
+// tests) or sequentially inside one BEGIN IMMEDIATE/COMMIT (see
+// AllocAndInsertMachine) without duplicating either query.
+type dbExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+	Query(query string, args ...any) (*sql.Rows, error)
+}
+
+func allocIP(db dbExecer) (string, error) {
+	rows, err := db.Query(`SELECT ip FROM machines`)
 	if err != nil {
 		return "", fmt.Errorf("query allocated ips: %w", err)
 	}
@@ -192,7 +205,11 @@ type Machine struct {
 
 // InsertMachine records a new machine in the "starting" state.
 func (s *Store) InsertMachine(id, app string, releaseID int64, ip, tap string) error {
-	_, err := s.db.Exec(
+	return insertMachine(s.db, id, app, releaseID, ip, tap)
+}
+
+func insertMachine(db dbExecer, id, app string, releaseID int64, ip, tap string) error {
+	_, err := db.Exec(
 		`INSERT INTO machines(id, app, release_id, ip, tap, state) VALUES (?, ?, ?, ?, ?, 'starting')`,
 		id, app, releaseID, ip, tap,
 	)
@@ -200,6 +217,34 @@ func (s *Store) InsertMachine(id, app string, releaseID int64, ip, tap string) e
 		return fmt.Errorf("insert machine %s: %w", id, err)
 	}
 	return nil
+}
+
+// AllocAndInsertMachine allocates a free IP and inserts the new machine row
+// (state "starting") in one BEGIN IMMEDIATE/COMMIT transaction, so a
+// concurrent AllocIP can never observe the allocated-but-not-yet-inserted
+// gap between the two calls and hand out the same address twice. Store
+// already serializes all access through a single *sql.DB connection
+// (SetMaxOpenConns(1) in Open), so plain sequential Exec/Query calls between
+// BEGIN IMMEDIATE and COMMIT are correct here, matching the rest of this
+// file's non-transactional style.
+func (s *Store) AllocAndInsertMachine(id, app string, releaseID int64, tap string) (string, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", fmt.Errorf("begin alloc+insert machine %s: %w", id, err)
+	}
+	defer tx.Rollback() // no-op once Commit has succeeded
+
+	ip, err := allocIP(tx)
+	if err != nil {
+		return "", err
+	}
+	if err := insertMachine(tx, id, app, releaseID, ip, tap); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("commit alloc+insert machine %s: %w", id, err)
+	}
+	return ip, nil
 }
 
 // SetMachineState transitions a machine to state and records its host pid.
@@ -227,11 +272,12 @@ func (s *Store) DeleteMachine(id string) error {
 	return nil
 }
 
-// MachinesForApp lists all machines belonging to app.
+// MachinesForApp lists all machines belonging to app, most recently created
+// first.
 func (s *Store) MachinesForApp(app string) ([]Machine, error) {
 	rows, err := s.db.Query(
 		`SELECT id, app, release_id, node_id, ip, tap, state, COALESCE(pid, 0), created_at
-		 FROM machines WHERE app = ? ORDER BY created_at`,
+		 FROM machines WHERE app = ? ORDER BY created_at DESC, rowid DESC`,
 		app,
 	)
 	if err != nil {
@@ -241,16 +287,38 @@ func (s *Store) MachinesForApp(app string) ([]Machine, error) {
 }
 
 // RunningMachines lists every machine in the "running" state, across all
-// apps. Used by the daemon's startup reconcile loop.
+// apps, most recently created first. Used by the daemon's startup reconcile
+// loop.
 func (s *Store) RunningMachines() ([]Machine, error) {
 	rows, err := s.db.Query(
 		`SELECT id, app, release_id, node_id, ip, tap, state, COALESCE(pid, 0), created_at
-		 FROM machines WHERE state = 'running' ORDER BY created_at`,
+		 FROM machines WHERE state = 'running' ORDER BY created_at DESC, rowid DESC`,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("running machines: %w", err)
 	}
 	return scanMachines(rows)
+}
+
+// Machine looks up a single machine by id, e.g. for the post-Wait
+// still-current-row check in the daemon's background reap goroutine.
+func (s *Store) Machine(id string) (Machine, error) {
+	rows, err := s.db.Query(
+		`SELECT id, app, release_id, node_id, ip, tap, state, COALESCE(pid, 0), created_at
+		 FROM machines WHERE id = ?`,
+		id,
+	)
+	if err != nil {
+		return Machine{}, fmt.Errorf("machine %s: %w", id, err)
+	}
+	machines, err := scanMachines(rows)
+	if err != nil {
+		return Machine{}, err
+	}
+	if len(machines) == 0 {
+		return Machine{}, fmt.Errorf("machine %s: not found", id)
+	}
+	return machines[0], nil
 }
 
 func scanMachines(rows *sql.Rows) ([]Machine, error) {

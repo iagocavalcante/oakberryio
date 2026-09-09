@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -58,5 +59,20 @@ func TestApplyWritesAtomicallyWithoutRestartingOnTestOverride(t *testing.T) {
 	}
 	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
 		t.Fatalf("temp file %s.tmp should not remain", path)
+	}
+}
+
+func TestApplyRestartFailureIsErrRestart(t *testing.T) {
+	orig := restartCloudflared
+	restartCloudflared = func() error { return errors.New("boom") }
+	t.Cleanup(func() { restartCloudflared = orig })
+
+	path := filepath.Join(t.TempDir(), "config.yml")
+	err := Apply(path, []byte("tunnel: t\n"))
+	if err == nil {
+		t.Fatal("want error")
+	}
+	if !errors.Is(err, ErrRestart) {
+		t.Fatalf("err = %v, want errors.Is(err, ErrRestart)", err)
 	}
 }

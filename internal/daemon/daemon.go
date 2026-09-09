@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -67,7 +68,14 @@ type Daemon struct {
 // New opens the store, loads the age identity (if KeyFile is set), and
 // wires the daemon's components. It does not start listening or reconcile
 // machines; call Reconcile then Run for that.
-func New(cfg Config) (*Daemon, error) {
+//
+// ctx becomes the Deployer's BaseCtx: the context every microVM is started
+// under (via context.WithoutCancel), independent of whatever per-request
+// context triggers a given deploy. Pass a context tied to the daemon
+// process's own lifetime (e.g. the one signal.NotifyContext returns in
+// cmd/oakd/main.go), not a per-request one, or every machine will die the
+// instant the request that started it completes.
+func New(ctx context.Context, cfg Config) (*Daemon, error) {
 	cfg.applyDefaults()
 
 	st, err := store.Open(filepath.Join(cfg.DataDir, "oak.db"))
@@ -91,11 +99,17 @@ func New(cfg Config) (*Daemon, error) {
 		DataDir:      cfg.DataDir,
 		LogDir:       cfg.LogDir,
 		Identity:     identity,
+		BaseCtx:      ctx,
 		Domain:       cfg.Domain,
 		TunnelID:     cfg.TunnelID,
 		TunnelConfig: cfg.TunnelConfig,
 		TunnelCreds:  cfg.TunnelCreds,
 		APIPort:      cfg.APIPort,
+	}
+
+	if err := os.MkdirAll(deployer.socketDir(), 0755); err != nil {
+		_ = st.Close()
+		return nil, fmt.Errorf("mkdir socket dir %s: %w", deployer.socketDir(), err)
 	}
 
 	dnsServer := &dns.Server{
@@ -188,6 +202,8 @@ func (d *Daemon) reconcileOne(ctx context.Context, m store.Machine) error {
 		Volumes:   volSpecs,
 		Tap:       m.Tap,
 		MAC:       mac,
+		IP:        m.IP + "/16",
+		Gateway:   "10.200.0.1",
 		MemoryMB:  int64(cfg.VM.MemoryMB),
 		CPUs:      int64(cfg.VM.CPUs),
 		LogPath:   filepath.Join(logDir, m.ID+".log"),
@@ -206,7 +222,17 @@ func (d *Daemon) reconcileOne(ctx context.Context, m store.Machine) error {
 		Mounts:     mounts,
 	}
 
-	handle, err := d.Deployer.Runtime.Start(ctx, spec, guest)
+	// See Deploy's identical guard: a leftover socket file from before this
+	// machine's previous run (crashed daemon, crashed Firecracker) fails
+	// Config.Validate before Start ever gets to boot anything.
+	if err := os.Remove(filepath.Join(d.Deployer.socketDir(), m.ID+".sock")); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove stale socket for %s: %w", m.ID, err)
+	}
+
+	// Same BaseCtx reasoning as Deploy: this must outlive Reconcile's own
+	// ctx (bounded by the daemon startup sequence), or the VMM dies the
+	// moment Reconcile returns.
+	handle, err := d.Deployer.Runtime.Start(context.WithoutCancel(d.Deployer.baseCtx()), spec, guest)
 	if err != nil {
 		return fmt.Errorf("start: %w", err)
 	}
@@ -215,12 +241,18 @@ func (d *Daemon) reconcileOne(ctx context.Context, m store.Machine) error {
 	if err := d.Store.SetMachineState(m.ID, "running", handle.PID()); err != nil {
 		return fmt.Errorf("set state: %w", err)
 	}
+	go d.Deployer.watchMachine(m.ID, handle)
 	return nil
 }
 
 // Run starts the DNS server and both API listeners (unix socket, trusted;
 // TCP on 127.0.0.1:<api_port>, bearer-token guarded), blocking until ctx is
-// cancelled or one of them fails.
+// cancelled or one of them fails. The TCP listener is skipped entirely when
+// no APIToken is configured: AuthMiddleware would otherwise compare every
+// request's bearer token against an empty string, so an unset token doesn't
+// mean "no auth" -- it silently locks the API to a token nobody has. That's
+// a worse failure mode than just not exposing the remote listener until an
+// operator sets one.
 func (d *Daemon) Run(ctx context.Context) error {
 	errCh := make(chan error, 3)
 
@@ -242,26 +274,35 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 	}()
 
-	tcpAddr := fmt.Sprintf("127.0.0.1:%d", d.cfg.APIPort)
-	tcpLn, err := net.Listen("tcp", tcpAddr)
-	if err != nil {
-		_ = unixLn.Close()
-		return fmt.Errorf("tcp listen %s: %w", tcpAddr, err)
-	}
-	go func() {
-		if err := http.Serve(tcpLn, d.API.AuthMiddleware(mux)); err != nil && !errors.Is(err, net.ErrClosed) {
-			errCh <- fmt.Errorf("tcp api: %w", err)
+	var tcpLn net.Listener
+	if d.cfg.APIToken == "" {
+		log.Printf("oakd: api_token not set; serving only the unix socket, not 127.0.0.1:%d", d.cfg.APIPort)
+	} else {
+		tcpAddr := fmt.Sprintf("127.0.0.1:%d", d.cfg.APIPort)
+		tcpLn, err = net.Listen("tcp", tcpAddr)
+		if err != nil {
+			_ = unixLn.Close()
+			return fmt.Errorf("tcp listen %s: %w", tcpAddr, err)
 		}
-	}()
+		go func() {
+			if err := http.Serve(tcpLn, d.API.AuthMiddleware(mux)); err != nil && !errors.Is(err, net.ErrClosed) {
+				errCh <- fmt.Errorf("tcp api: %w", err)
+			}
+		}()
+	}
 
 	select {
 	case <-ctx.Done():
 		_ = unixLn.Close()
-		_ = tcpLn.Close()
+		if tcpLn != nil {
+			_ = tcpLn.Close()
+		}
 		return nil
 	case err := <-errCh:
 		_ = unixLn.Close()
-		_ = tcpLn.Close()
+		if tcpLn != nil {
+			_ = tcpLn.Close()
+		}
 		return err
 	}
 }

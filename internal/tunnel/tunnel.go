@@ -3,11 +3,18 @@
 package tunnel
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 )
+
+// ErrRestart wraps any failure to restart cloudflared after writing a new
+// config, so callers can distinguish "config written but cloudflared didn't
+// pick it up" (errors.Is(err, ErrRestart)) from a failure to write the
+// config at all.
+var ErrRestart = errors.New("tunnel: cloudflared restart failed")
 
 // Route is one cloudflared ingress rule: a hostname and the local service it
 // proxies to (e.g. "http://10.200.0.5:8080").
@@ -67,7 +74,7 @@ func Apply(path string, data []byte) error {
 		return err
 	}
 	if err := restartCloudflared(); err != nil {
-		return fmt.Errorf("tunnel: restart cloudflared: %w", err)
+		return fmt.Errorf("%w: %v", ErrRestart, err)
 	}
 	return nil
 }

@@ -8,6 +8,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -49,8 +50,24 @@ func fatal(err error) {
 }
 
 func run() error {
+	// Disable Ctrl-Alt-Del's default instantaneous-reboot behavior in favor
+	// of delivering it to us as SIGINT instead (RB_DISABLE_CAD in reboot(2)).
+	// Machine.Stop's m.fc.Shutdown sends Firecracker's SendCtrlAltDel, which
+	// only reaches us as a signal we can act on (forwarding it to the child
+	// in runChild, then powering off once it exits) if this is set; without
+	// it, Ctrl-Alt-Del reboots the guest immediately, bypassing PID 1
+	// entirely. Best-effort: if this somehow fails there is nothing else to
+	// do about it, and boot must proceed regardless.
+	_ = unix.Reboot(unix.LINUX_REBOOT_CMD_CAD_OFF)
+
 	if err := mountAll(); err != nil {
 		return fmt.Errorf("mount: %w", err)
+	}
+	if err := os.MkdirAll("/etc", 0755); err != nil {
+		return fmt.Errorf("mkdir /etc: %w", err)
+	}
+	if err := ensureStdio(); err != nil {
+		return fmt.Errorf("ensure stdio: %w", err)
 	}
 	if err := linkUp("lo"); err != nil {
 		return fmt.Errorf("lo up: %w", err)
@@ -87,9 +104,41 @@ func run() error {
 		return fmt.Errorf("run child: %w", err)
 	}
 
+	for _, m := range guest.Mounts {
+		_ = unix.Unmount(m.Dest, 0)
+	}
+
 	fmt.Printf("oak-init: exit %d\n", code)
 	unix.Sync()
 	return unix.Reboot(unix.LINUX_REBOOT_CMD_POWER_OFF)
+}
+
+// ensureStdio makes sure PID 1 has valid file descriptors 0, 1 and 2 before
+// anything tries to write to stdout/stderr or read stdin. The kernel starts
+// init with no controlling terminal and no open fds at all on some boot
+// paths; without this, os.Stdout writes (used throughout oak-init and by
+// the child process, see runChild) would fail silently or panic on a
+// closed fd. /dev must already be mounted (mountAll) for /dev/console to
+// exist.
+func ensureStdio() error {
+	for _, fd := range []uintptr{0, 1, 2} {
+		if _, err := unix.FcntlInt(fd, unix.F_GETFD, 0); err != nil {
+			console, err := unix.Open("/dev/console", unix.O_RDWR, 0)
+			if err != nil {
+				return fmt.Errorf("open /dev/console: %w", err)
+			}
+			for _, target := range []int{0, 1, 2} {
+				if err := unix.Dup2(console, target); err != nil {
+					return fmt.Errorf("dup2 console to fd %d: %w", target, err)
+				}
+			}
+			if console > 2 {
+				_ = unix.Close(console)
+			}
+			return nil
+		}
+	}
+	return nil
 }
 
 // mountAll sets up the pseudo-filesystems every guest needs before anything
@@ -126,8 +175,13 @@ func linkUp(name string) error {
 }
 
 // routeToMMDS adds a route to Firecracker's MMDS address over eth0. MMDS is
-// only reachable once this exists; there is no DHCP or default route yet at
-// this point in boot.
+// only reachable once this exists.
+//
+// oakd's BuildConfig also sets the kernel's own "ip=" boot parameter when a
+// Spec has an IP, which the kernel applies to eth0 (including a default
+// route) before any userspace, including this binary, ever runs. When that
+// happened, this route already exists; "already exists" is not an error
+// here, it's confirmation the fast path already worked.
 func routeToMMDS() error {
 	link, err := netlink.LinkByName("eth0")
 	if err != nil {
@@ -137,7 +191,8 @@ func routeToMMDS() error {
 	if err != nil {
 		return fmt.Errorf("parse mmds cidr: %w", err)
 	}
-	if err := netlink.RouteAdd(&netlink.Route{LinkIndex: link.Attrs().Index, Dst: dst}); err != nil {
+	err = netlink.RouteAdd(&netlink.Route{LinkIndex: link.Attrs().Index, Dst: dst})
+	if err != nil && !errors.Is(err, syscall.EEXIST) {
 		return fmt.Errorf("add route: %w", err)
 	}
 	return nil
@@ -162,19 +217,22 @@ func fetchGuest() (mmds.Guest, error) {
 			time.Sleep(250 * time.Millisecond)
 			continue
 		}
-		defer resp.Body.Close()
 
 		var guest mmds.Guest
 		if err := json.NewDecoder(resp.Body).Decode(&guest); err != nil {
+			resp.Body.Close()
 			return mmds.Guest{}, fmt.Errorf("decode mmds response: %w", err)
 		}
+		resp.Body.Close()
 		return guest, nil
 	}
 	return mmds.Guest{}, fmt.Errorf("mmds unreachable after retries: %w", lastErr)
 }
 
 // configureAddr applies the real IP and default route from the guest's MMDS
-// payload, replacing the bootstrap route added by routeToMMDS.
+// payload. Both may already be in place courtesy of the kernel's "ip="
+// boot parameter (see routeToMMDS), in which case AddrAdd/RouteAdd report
+// EEXIST; that's a no-op here, not a failure.
 func configureAddr(guest mmds.Guest) error {
 	link, err := netlink.LinkByName("eth0")
 	if err != nil {
@@ -185,7 +243,7 @@ func configureAddr(guest mmds.Guest) error {
 	if err != nil {
 		return fmt.Errorf("parse guest ip %q: %w", guest.IP, err)
 	}
-	if err := netlink.AddrAdd(link, addr); err != nil {
+	if err := netlink.AddrAdd(link, addr); err != nil && !errors.Is(err, syscall.EEXIST) {
 		return fmt.Errorf("add addr %s: %w", guest.IP, err)
 	}
 
@@ -193,7 +251,7 @@ func configureAddr(guest mmds.Guest) error {
 	if gw == nil {
 		return fmt.Errorf("invalid gateway %q", guest.Gateway)
 	}
-	if err := netlink.RouteAdd(&netlink.Route{LinkIndex: link.Attrs().Index, Gw: gw}); err != nil {
+	if err := netlink.RouteAdd(&netlink.Route{LinkIndex: link.Attrs().Index, Gw: gw}); err != nil && !errors.Is(err, syscall.EEXIST) {
 		return fmt.Errorf("add default route via %s: %w", guest.Gateway, err)
 	}
 	return nil
@@ -228,8 +286,22 @@ func mountVolumes(guest mmds.Guest) error {
 // blocks until it exits. It reaps every reparented zombie along the way, as
 // PID 1 must, but only reports the exit status of the direct child.
 func runChild(argv []string, guest mmds.Guest) (int, error) {
+	// exec.Command resolves a bare argv[0] (no path separator) via
+	// exec.LookPath against THIS process's own os.Getenv("PATH"), not
+	// cmd.Env — setting cmd.Env's PATH has no effect on that lookup. PID 1
+	// boots with no environment at all, so a CMD image like ["nginx"] would
+	// otherwise fail to even start. Set our real PATH first so the lookup
+	// below succeeds, then also seed it into the child's env as a baseline;
+	// guest.Env's own PATH, if the image or app config set one, still wins
+	// there via MergeEnv's override semantics.
+	path := guest.Env["PATH"]
+	if path == "" {
+		path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	}
+	_ = os.Setenv("PATH", path)
+
 	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Env = mmds.MergeEnv(nil, guest.Env)
+	cmd.Env = mmds.MergeEnv([]string{"PATH=" + path}, guest.Env)
 	cmd.Dir = guest.WorkingDir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stdout

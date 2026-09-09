@@ -4,8 +4,10 @@ package vm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"syscall"
 	"time"
 
 	firecracker "github.com/firecracker-microvm/firecracker-go-sdk"
@@ -44,24 +46,41 @@ func createTap(name string) (netlink.Link, error) {
 	attrs.Name = name
 	tap := &netlink.Tuntap{LinkAttrs: attrs, Mode: netlink.TUNTAP_MODE_TAP}
 	if err := netlink.LinkAdd(tap); err != nil {
-		return nil, fmt.Errorf("link add: %w", err)
+		if !errors.Is(err, syscall.EEXIST) {
+			return nil, fmt.Errorf("link add: %w", err)
+		}
+		// A tap with this name was left behind, most likely by an unclean
+		// daemon restart before the previous Machine's Stop/release ran.
+		// Delete it and retry once rather than failing the whole deploy.
+		if existing, lookupErr := netlink.LinkByName(name); lookupErr == nil {
+			_ = netlink.LinkDel(existing)
+		}
+		if err := netlink.LinkAdd(tap); err != nil {
+			return nil, fmt.Errorf("link add (retry after delete): %w", err)
+		}
 	}
 
 	bridge, err := netlink.LinkByName("oak0")
 	if err != nil {
+		_ = netlink.LinkDel(tap)
 		return nil, fmt.Errorf("bridge oak0: %w", err)
 	}
 	if err := netlink.LinkSetMaster(tap, bridge); err != nil {
+		_ = netlink.LinkDel(tap)
 		return nil, fmt.Errorf("set master oak0: %w", err)
 	}
 	if err := netlink.LinkSetUp(tap); err != nil {
+		_ = netlink.LinkDel(tap)
 		return nil, fmt.Errorf("set up: %w", err)
 	}
 	return tap, nil
 }
 
 func startMachine(ctx context.Context, spec Spec, meta mmds.Guest, tap netlink.Link) (*Machine, error) {
-	cfg := BuildConfig(spec)
+	cfg, err := BuildConfig(spec)
+	if err != nil {
+		return nil, fmt.Errorf("vm: build config: %w", err)
+	}
 
 	logFile, err := os.OpenFile(spec.LogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {

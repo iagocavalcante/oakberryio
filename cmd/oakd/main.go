@@ -25,14 +25,18 @@ func main() {
 		log.Fatalf("oakd: load config %s: %v", *configPath, err)
 	}
 
-	d, err := daemon.New(cfg)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
+	// ctx becomes the Deployer's BaseCtx, so every microVM Start boots under
+	// this process-lifetime context (via context.WithoutCancel) rather than
+	// whatever short-lived context triggers a given deploy. It must be
+	// created before daemon.New, not after.
+	d, err := daemon.New(ctx, cfg)
 	if err != nil {
 		log.Fatalf("oakd: init: %v", err)
 	}
 	defer d.Close()
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
 
 	if err := d.Reconcile(ctx); err != nil {
 		log.Printf("oakd: reconcile: %v", err)

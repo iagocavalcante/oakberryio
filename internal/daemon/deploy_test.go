@@ -22,10 +22,32 @@ import (
 type fakeHandle struct {
 	pid     int
 	stopped bool
+
+	// waitCh, when set, is what Wait blocks on; closing it (or sending an
+	// error) makes Wait return that error (nil for a closed channel). Left
+	// nil, Wait blocks until ctx is cancelled -- a nil channel's receive
+	// case in the select below never fires, so this mirrors a real
+	// still-running process's Wait: it doesn't return on its own just
+	// because nobody's watching. Deploy's tests use context.Background() as
+	// BaseCtx, so a Deployer's watchMachine goroutine for a handle that
+	// never has its waitCh touched simply leaks for the life of the test
+	// process rather than firing a spurious "stopped" transition that would
+	// race e.g. TestDeployFailingHealthCheckLeavesOldRunningAndDeletesNew's
+	// assertion that the first deploy's machine is still "running".
+	waitCh chan error
 }
 
 func (h *fakeHandle) PID() int                       { return h.pid }
 func (h *fakeHandle) Stop(ctx context.Context) error { h.stopped = true; return nil }
+
+func (h *fakeHandle) Wait(ctx context.Context) error {
+	select {
+	case err := <-h.waitCh:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 type fakeRuntime struct {
 	mu       sync.Mutex
@@ -33,6 +55,14 @@ type fakeRuntime struct {
 	starts   []vm.Spec
 	startErr error
 	env      []string
+
+	// waitCh, when set, is handed to every fakeHandle Start creates, so a
+	// test can control when that handle's Wait returns (see fakeHandle.Wait).
+	waitCh chan error
+	// startCtx captures the ctx passed to the most recent Start call, so a
+	// test can assert on its lifetime independent of the ctx passed to
+	// Deploy (see TestDeployStartCtxSurvivesRequestCancellation).
+	startCtx context.Context
 }
 
 func (r *fakeRuntime) BuildRootfs(ctx context.Context, image, out string) (*rootfs.ImageMeta, error) {
@@ -51,7 +81,8 @@ func (r *fakeRuntime) Start(ctx context.Context, spec vm.Spec, meta mmds.Guest) 
 	defer r.mu.Unlock()
 	r.nextPID++
 	r.starts = append(r.starts, spec)
-	return &fakeHandle{pid: r.nextPID}, nil
+	r.startCtx = ctx
+	return &fakeHandle{pid: r.nextPID, waitCh: r.waitCh}, nil
 }
 
 type fakeChecker struct {
@@ -312,5 +343,116 @@ func TestBuildGuestEnvSecretsWinOverAppConfigEnv(t *testing.T) {
 	}
 	if env["FOO"] != "secretval" {
 		t.Fatalf("secret should win over app config env: %+v", env)
+	}
+}
+
+func TestBuildGuestEnvDefaultsPathWhenNotSetByImageOrConfig(t *testing.T) {
+	d := testDeployer(t, &fakeRuntime{}, &fakeChecker{healthy: true})
+	cfg := baseConfig("hello")
+
+	env, err := d.buildGuestEnv(cfg, []string{"BASE=1"})
+	if err != nil {
+		t.Fatalf("build guest env: %v", err)
+	}
+	if env["PATH"] != "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" {
+		t.Fatalf("PATH not defaulted: %+v", env)
+	}
+}
+
+func TestBuildGuestEnvDoesNotClobberImagePath(t *testing.T) {
+	d := testDeployer(t, &fakeRuntime{}, &fakeChecker{healthy: true})
+	cfg := baseConfig("hello")
+
+	env, err := d.buildGuestEnv(cfg, []string{"PATH=/opt/app/bin"})
+	if err != nil {
+		t.Fatalf("build guest env: %v", err)
+	}
+	if env["PATH"] != "/opt/app/bin" {
+		t.Fatalf("clobbered image PATH: %+v", env)
+	}
+}
+
+// --- Start's context must outlive the caller's per-request ctx ------------
+
+func TestDeployStartCtxSurvivesRequestCancellation(t *testing.T) {
+	rt := &fakeRuntime{}
+	d := testDeployer(t, rt, &fakeChecker{healthy: true})
+	d.BaseCtx = context.Background()
+	cfg := baseConfig("hello")
+
+	reqCtx, cancel := context.WithCancel(context.Background())
+	if _, err := d.Deploy(reqCtx, cfg, "img:1", nil); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+	cancel()
+
+	rt.mu.Lock()
+	startCtx := rt.startCtx
+	rt.mu.Unlock()
+	if startCtx == nil {
+		t.Fatal("Start was never called")
+	}
+	if err := startCtx.Err(); err != nil {
+		t.Fatalf("Start's ctx was cancelled along with the request ctx: %v", err)
+	}
+}
+
+// --- watchMachine: reap an unexpectedly-exited machine ----------------------
+
+func TestWatchMachineMarksStoppedWhenProcessExits(t *testing.T) {
+	waitCh := make(chan error, 1)
+	rt := &fakeRuntime{waitCh: waitCh}
+	d := testDeployer(t, rt, &fakeChecker{healthy: true})
+	cfg := baseConfig("hello")
+
+	id, err := d.Deploy(context.Background(), cfg, "img:1", nil)
+	if err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+
+	close(waitCh)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		m, err := d.Store.Machine(id)
+		if err != nil {
+			t.Fatalf("machine: %v", err)
+		}
+		if m.State == "stopped" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("machine %s never marked stopped, state=%s", id, m.State)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestWatchMachineNoopsWhenRowDeletedBeforeExit(t *testing.T) {
+	waitCh := make(chan error, 1)
+	rt := &fakeRuntime{waitCh: waitCh}
+	d := testDeployer(t, rt, &fakeChecker{healthy: true})
+	cfg := baseConfig("hello")
+
+	id, err := d.Deploy(context.Background(), cfg, "img:1", nil)
+	if err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+
+	// Simulate the row already having been superseded (e.g. by
+	// stopOldMachines from a later deploy) before this machine's process
+	// actually exits.
+	if err := d.Store.DeleteMachine(id); err != nil {
+		t.Fatalf("delete machine: %v", err)
+	}
+	close(waitCh)
+
+	// watchMachine must neither panic nor resurrect the deleted row.
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, err := d.Store.Machine(id); err == nil {
+		t.Fatal("want machine to stay deleted")
 	}
 }

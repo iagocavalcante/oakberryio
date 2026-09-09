@@ -13,7 +13,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -44,6 +46,11 @@ type Runtime interface {
 type Handle interface {
 	PID() int
 	Stop(ctx context.Context) error
+	// Wait blocks until the underlying process exits, however it exits (a
+	// clean shutdown from inside the guest, a crash, or Stop's own kill).
+	// The Deployer uses it to notice an unexpected exit and reconcile the
+	// store, see watchMachine.
+	Wait(ctx context.Context) error
 }
 
 // Checker is a single health check against a machine's service.
@@ -70,6 +77,18 @@ type Deployer struct {
 	DataDir  string
 	LogDir   string
 	Identity *age.X25519Identity // nil if secrets aren't configured; buildGuestEnv skips them then
+
+	// BaseCtx is the context passed to Runtime.Start (via
+	// context.WithoutCancel), instead of the per-call ctx a caller like an
+	// HTTP handler passes to Deploy. firecracker-go-sdk's VMCommandBuilder
+	// runs the VMM under exec.CommandContext(ctx, ...): if that ctx is the
+	// request's own context, it's cancelled the instant the HTTP handler
+	// returns and kills the VMM immediately after boot. BaseCtx should live
+	// for the daemon process's lifetime (e.g. the ctx cancelled by SIGTERM in
+	// cmd/oakd/main.go) so machines outlive the request that started them.
+	// Defaults to context.Background() when nil, so existing callers/tests
+	// that never set it keep working.
+	BaseCtx context.Context
 
 	Kernel    string // defaults to /var/lib/oak/kernel/vmlinux, see kernel()
 	SocketDir string // defaults to <DataDir>/run, see socketDir()
@@ -118,6 +137,9 @@ func (d *Deployer) Deploy(ctx context.Context, cfg *appconfig.Config, image stri
 	d.cacheConfig(cfg.App, cfg)
 
 	emit("building rootfs...\n")
+	// ponytail: old rootfs images under <DataDir>/images/<app>/ from previous
+	// releases are never pruned; add a retention sweep (keep last N) if disk
+	// usage becomes a problem.
 	rootfsPath := filepath.Join(d.DataDir, "images", cfg.App, fmt.Sprintf("%d.ext4", time.Now().UnixNano()))
 	if err := os.MkdirAll(filepath.Dir(rootfsPath), 0755); err != nil {
 		return "", fmt.Errorf("mkdir %s: %w", filepath.Dir(rootfsPath), err)
@@ -145,22 +167,19 @@ func (d *Deployer) Deploy(ctx context.Context, cfg *appconfig.Config, image stri
 		return "", fmt.Errorf("resolve volumes: %w", err)
 	}
 
-	ip, err := d.Store.AllocIP()
-	if err != nil {
-		return "", fmt.Errorf("alloc ip: %w", err)
-	}
-	mac, err := vm.MACFromIP(ip)
-	if err != nil {
-		return "", fmt.Errorf("mac from ip %s: %w", ip, err)
-	}
 	id, err := newMachineID()
 	if err != nil {
 		return "", fmt.Errorf("generate machine id: %w", err)
 	}
 	tap := "oak-" + id[:8]
 
-	if err := d.Store.InsertMachine(id, cfg.App, releaseID, ip, tap); err != nil {
-		return "", fmt.Errorf("insert machine %s: %w", id, err)
+	ip, err := d.Store.AllocAndInsertMachine(id, cfg.App, releaseID, tap)
+	if err != nil {
+		return "", fmt.Errorf("alloc ip and insert machine %s: %w", id, err)
+	}
+	mac, err := vm.MACFromIP(ip)
+	if err != nil {
+		return "", fmt.Errorf("mac from ip %s: %w", ip, err)
 	}
 
 	envMap, err := d.buildGuestEnv(cfg, meta.Env)
@@ -193,14 +212,29 @@ func (d *Deployer) Deploy(ctx context.Context, cfg *appconfig.Config, image stri
 		Volumes:   volSpecs,
 		Tap:       tap,
 		MAC:       mac,
+		IP:        ip + "/16",
+		Gateway:   "10.200.0.1",
 		MemoryMB:  int64(cfg.VM.MemoryMB),
 		CPUs:      int64(cfg.VM.CPUs),
 		LogPath:   logPath,
 		SocketDir: d.socketDir(),
 	}
 
+	// A leftover socket file at this machine ID's path (e.g. from a previous
+	// crash of oakd itself, or of Firecracker, before this ID's row was
+	// cleaned up) makes firecracker-go-sdk's Config.Validate fail with "file
+	// already exists" before it ever tries to boot.
+	if err := os.Remove(filepath.Join(d.socketDir(), id+".sock")); err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("remove stale socket for %s: %w", id, err)
+	}
+
 	emit("starting machine...\n")
-	handle, err := d.Runtime.Start(ctx, spec, guest)
+	// Runtime.Start's context must outlive this call: firecracker-go-sdk
+	// runs the VMM under exec.CommandContext, which kills the process the
+	// instant its context is cancelled, and ctx here is the caller's
+	// per-request context (cancelled once the deploy HTTP handler returns).
+	// See BaseCtx's doc comment.
+	handle, err := d.Runtime.Start(context.WithoutCancel(d.baseCtx()), spec, guest)
 	if err != nil {
 		_ = d.Store.SetMachineState(id, "failed", 0)
 		_ = d.Store.DeleteMachine(id)
@@ -222,16 +256,58 @@ func (d *Deployer) Deploy(ctx context.Context, cfg *appconfig.Config, image stri
 	if err := d.Store.SetMachineState(id, "running", handle.PID()); err != nil {
 		return "", fmt.Errorf("mark machine %s running: %w", id, err)
 	}
+	go d.watchMachine(id, handle)
 
 	if err := d.stopOldMachines(ctx, cfg.App, id); err != nil {
 		return id, fmt.Errorf("stop previous machines for %s: %w", cfg.App, err)
 	}
 
 	if err := d.applyTunnel(ctx); err != nil {
+		if errors.Is(err, tunnel.ErrRestart) {
+			// The config is on disk; cloudflared just didn't reload it. The
+			// deploy itself succeeded -- surface a warning rather than
+			// failing a deploy whose machine is up and healthy.
+			emit(fmt.Sprintf("tunnel restart failed: %v; deploy is live\n", err))
+			return id, nil
+		}
 		return id, fmt.Errorf("apply tunnel config: %w", err)
 	}
 
 	return id, nil
+}
+
+// watchMachine blocks until handle's underlying process exits, then -- only
+// if the store still shows this exact machine (by ID and PID) as "running",
+// meaning nothing else has already superseded it (a later deploy's
+// stopOldMachines, or Reconcile after a daemon restart) -- marks it stopped,
+// drops the in-memory handle, and best-effort re-renders the tunnel config
+// so the dead machine's route disappears. Runs for the lifetime of the
+// daemon process, hence BaseCtx rather than any per-call ctx.
+func (d *Deployer) watchMachine(id string, handle Handle) {
+	waitErr := handle.Wait(context.WithoutCancel(d.baseCtx()))
+
+	m, err := d.Store.Machine(id)
+	if err != nil {
+		// Row is gone entirely: another path (stopOldMachines, a failed
+		// deploy's cleanup) already deleted it. Nothing to reconcile.
+		return
+	}
+	if m.State != "running" || int(m.PID) != handle.PID() {
+		// Superseded by a later deploy/reconcile before this exit was
+		// observed; that path owns the row now.
+		return
+	}
+
+	if waitErr != nil {
+		log.Printf("oakd: machine %s exited with error: %v", id, waitErr)
+	}
+	if err := d.Store.SetMachineState(id, "stopped", 0); err != nil {
+		log.Printf("oakd: mark machine %s stopped after exit: %v", id, err)
+	}
+	d.removeHandle(id)
+	if err := d.applyTunnel(context.WithoutCancel(d.baseCtx())); err != nil {
+		log.Printf("oakd: re-apply tunnel after machine %s exited: %v", id, err)
+	}
 }
 
 // awaitHealthy polls Checker.Healthy for up to the configured budget
@@ -361,6 +437,10 @@ func (d *Deployer) buildGuestEnv(cfg *appconfig.Config, imageEnv []string) (map[
 		if !inOverride && !envSliceHasKey(imageEnv, "PORT") {
 			override["PORT"] = strconv.Itoa(cfg.Services[0].InternalPort)
 		}
+	}
+
+	if _, ok := override["PATH"]; !ok && !envSliceHasKey(imageEnv, "PATH") {
+		override["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 	}
 
 	return envSliceToMap(mmds.MergeEnv(imageEnv, override)), nil
@@ -509,6 +589,16 @@ func (d *Deployer) socketDir() string {
 		return d.SocketDir
 	}
 	return filepath.Join(d.DataDir, "run")
+}
+
+// baseCtx returns BaseCtx, defaulting to context.Background() so Deployers
+// built directly (tests, or any future caller that never sets BaseCtx) don't
+// hand context.WithoutCancel a nil parent, which panics.
+func (d *Deployer) baseCtx() context.Context {
+	if d.BaseCtx != nil {
+		return d.BaseCtx
+	}
+	return context.Background()
 }
 
 func (d *Deployer) credsFile() string {

@@ -75,6 +75,43 @@ func TestAllocIPFillsGapAfterMachineRemoved(t *testing.T) {
 	}
 }
 
+func TestAllocAndInsertMachineAllocatesAndInsertsAtomically(t *testing.T) {
+	s := openTemp(t)
+	if err := s.UpsertApp("a", "{}"); err != nil {
+		t.Fatalf("upsert app: %v", err)
+	}
+	relID, err := s.InsertRelease("a", "img:1", "/rootfs/a-1.ext4", `[]`, `{}`, "/")
+	if err != nil {
+		t.Fatalf("insert release: %v", err)
+	}
+
+	ip1, err := s.AllocAndInsertMachine("m1", "a", relID, "tap-m1")
+	if err != nil {
+		t.Fatalf("alloc and insert machine: %v", err)
+	}
+	if ip1 != "10.200.0.2" {
+		t.Fatalf("ip1 = %q, want 10.200.0.2", ip1)
+	}
+
+	// The insert must be visible immediately (the transaction committed),
+	// and AllocIP must see it and skip it.
+	machines, err := s.MachinesForApp("a")
+	if err != nil {
+		t.Fatalf("machines for app: %v", err)
+	}
+	if len(machines) != 1 || machines[0].ID != "m1" || machines[0].IP != ip1 {
+		t.Fatalf("machines = %+v, want one row m1/%s", machines, ip1)
+	}
+
+	ip2, err := s.AllocAndInsertMachine("m2", "a", relID, "tap-m2")
+	if err != nil {
+		t.Fatalf("alloc and insert machine 2: %v", err)
+	}
+	if ip2 != "10.200.0.3" {
+		t.Fatalf("ip2 = %q, want 10.200.0.3 (m1's ip must not be reallocated)", ip2)
+	}
+}
+
 func TestMachinesForApp(t *testing.T) {
 	s := openTemp(t)
 	if err := s.UpsertApp("a", "{}"); err != nil {

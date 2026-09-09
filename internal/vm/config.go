@@ -29,6 +29,8 @@ type Spec struct {
 	Volumes   []string // extra drive images, become /dev/vdb, /dev/vdc, ...
 	Tap       string   // host tap device name
 	MAC       string   // guest NIC MAC, see MACFromIP
+	IP        string   // guest static IP incl. netmask, e.g. "10.200.0.5/16"; empty means no static IP
+	Gateway   string   // guest default gateway, e.g. "10.200.0.1"; empty means no static IP
 	MemoryMB  int64
 	CPUs      int64
 	LogPath   string // guest serial console (ttyS0) output file
