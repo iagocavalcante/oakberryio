@@ -75,7 +75,8 @@ func run() error {
 	if err := linkUp("eth0"); err != nil {
 		return fmt.Errorf("eth0 up: %w", err)
 	}
-	if err := ensureFallbackAddr(); err != nil {
+	addedFallback, err := ensureFallbackAddr()
+	if err != nil {
 		return fmt.Errorf("ensure fallback addr: %w", err)
 	}
 	if err := routeToMMDS(); err != nil {
@@ -89,6 +90,11 @@ func run() error {
 
 	if err := configureAddr(guest); err != nil {
 		return fmt.Errorf("configure eth0: %w", err)
+	}
+	if addedFallback {
+		if err := removeFallbackAddr(); err != nil {
+			return fmt.Errorf("remove fallback addr: %w", err)
+		}
 	}
 	if err := writeNetworkFiles(guest); err != nil {
 		return fmt.Errorf("write network files: %w", err)
@@ -107,6 +113,14 @@ func run() error {
 		return fmt.Errorf("run child: %w", err)
 	}
 
+	// Orphans reparented to us may still hold the volume mounts; kill them
+	// (pid -1 = everyone except init) and reap before unmounting.
+	_ = unix.Kill(-1, unix.SIGKILL)
+	for {
+		if _, err := unix.Wait4(-1, nil, 0, nil); err != nil {
+			break
+		}
+	}
 	for _, m := range guest.Mounts {
 		_ = unix.Unmount(m.Dest, 0)
 	}
@@ -352,8 +366,9 @@ func runChild(argv []string, guest mmds.Guest) (int, error) {
 	go func() {
 		for {
 			select {
-			case sig := <-sigCh:
-				_ = cmd.Process.Signal(sig)
+			case <-sigCh:
+				// Ctrl-Alt-Del arrives as SIGINT; most servers only honor SIGTERM.
+				_ = cmd.Process.Signal(syscall.SIGTERM)
 			case <-forwarding:
 				return
 			}
