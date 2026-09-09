@@ -9,7 +9,7 @@ grep -q -E 'svm|vmx' /proc/cpuinfo || { echo "no virtualization flag: enable SVM
 [ -e /dev/kvm ] || { echo "/dev/kvm missing"; exit 1; }
 
 apt-get update
-apt-get install -y curl jq nftables e2fsprogs docker.io age sqlite3
+apt-get install -y curl jq nftables e2fsprogs docker.io age sqlite3 rsync
 
 # firecracker
 if ! command -v firecracker >/dev/null; then
@@ -38,19 +38,42 @@ Name=oak0
 [Network]
 Address=10.200.0.1/16
 IPForward=yes
+ConfigureWithoutCarrier=yes
+[Link]
+RequiredForOnline=no
 N
 systemctl enable --now systemd-networkd
 networkctl reload
 
-# nat
-cat >/etc/nftables.conf <<'N'
-flush ruleset
-table ip nat {
-  chain postrouting { type nat hook postrouting priority 100; oifname != "oak0" ip saddr 10.200.0.0/16 masquerade; }
+# nftables: Docker manages its own nftables/iptables state (including a
+# FORWARD DROP policy), so this must not `flush ruleset` -- that would wipe
+# Docker's rules on every idempotent re-run -- and oak0's forwarded traffic
+# needs its own explicit accept since Docker's DROP policy would otherwise
+# catch it too. oak's rules live in their own table/file, included from
+# /etc/nftables.conf rather than replacing it.
+mkdir -p /etc/nftables.d
+cat >/etc/nftables.d/oak.nft <<'N'
+table ip oak {
+  chain forward {
+    type filter hook forward priority -10;
+    iifname "oak0" accept
+    oifname "oak0" ct state related,established accept
+    oifname "oak0" accept
+  }
+  chain postrouting {
+    type nat hook postrouting priority 100;
+    oifname != "oak0" ip saddr 10.200.0.0/16 masquerade
+  }
 }
 N
+if [ ! -f /etc/nftables.conf ]; then
+  printf '#!/usr/sbin/nft -f\ninclude "/etc/nftables.d/oak.nft"\n' >/etc/nftables.conf
+elif ! grep -q 'include "/etc/nftables.d/oak.nft"' /etc/nftables.conf; then
+  echo 'include "/etc/nftables.d/oak.nft"' >>/etc/nftables.conf
+fi
+nft delete table ip oak 2>/dev/null || true
+nft -f /etc/nftables.d/oak.nft
 systemctl enable --now nftables
-nft -f /etc/nftables.conf
 sysctl -w net.ipv4.ip_forward=1
 echo 'net.ipv4.ip_forward=1' >/etc/sysctl.d/99-oak.conf
 

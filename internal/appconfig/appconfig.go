@@ -9,6 +9,14 @@ import (
 
 var nameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`)
 
+// ValidName reports whether name is a valid app name: lowercase letters,
+// digits and dashes, max 32 characters. Shared with internal/daemon/api.go
+// so path-derived app names get the same validation as oak.toml's app field
+// before they're used to build filesystem paths or SQL lookups.
+func ValidName(name string) bool {
+	return nameRe.MatchString(name)
+}
+
 type Config struct {
 	App      string            `toml:"app"`
 	Build    Build             `toml:"build"`
@@ -42,7 +50,7 @@ func Parse(b []byte) (*Config, error) {
 	if err := toml.Unmarshal(b, c); err != nil {
 		return nil, fmt.Errorf("parse oak.toml: %w", err)
 	}
-	if !nameRe.MatchString(c.App) {
+	if !ValidName(c.App) {
 		return nil, fmt.Errorf("app name %q: lowercase letters, digits, dashes, max 32", c.App)
 	}
 	if c.Build.Dockerfile == "" {

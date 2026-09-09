@@ -1,0 +1,16 @@
+[Unit]
+Description=oakberryio first-boot host setup
+ConditionPathExists=!/etc/oak/.setup-done
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/oak/firstboot.env
+ExecStart=/opt/oak/host-setup.sh
+ExecStartPost=/usr/bin/touch /etc/oak/.setup-done
+ExecStartPost=/usr/bin/systemctl restart oakd
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,9 +1,15 @@
 # Bootable autoinstall USB
 
 `scripts/make-usb.sh` builds a USB stick that installs Ubuntu Server 24.04
-unattended, partitions the SSD (root) and HDD (backups) per the design,
-installs and enables `oakd` and the backup timer, and reboots into a working
-host. The only manual step left afterward is `cloudflared tunnel login`.
+unattended, partitions the SSD (root) and HDD (backups) per the design, and
+stages `oakd`, `oak-init`, `oak-backup.sh` and their systemd units onto the
+box. The autoinstaller's `late-commands` run inside curtin's install-time
+chroot, which has no running init, network namespace, or Docker daemon --
+so they only *stage* files and enable units; the actual host bootstrap
+(bridge, nftables, Firecracker + kernel download, secrets key, local
+registry, cloudflared) runs once, automatically, via `oak-firstboot.service`
+on the box's first real boot (see "After the reboot" below). The only
+manual step left afterward is `cloudflared tunnel login`.
 
 ## Required tools (on the Mac)
 
@@ -97,16 +103,30 @@ this is destructive to whatever is on that disk.
 
 1. Enable **SVM** (AMD) or **VT-x/VMX** (Intel) in BIOS/UEFI -- required for
    Firecracker later (see docs/host.md #1).
-2. Boot from the USB stick in UEFI mode.
-3. The install is unattended: expect ~10 minutes and one reboot. It
-   partitions `OAK_SSD` (EFI + root, mounted at `/`) and `OAK_HDD`
-   (mounted at `/var/lib/oak/backups`), runs `host-setup.sh`, and installs
-   `oakd`/`oak-init`/`oak-backup.sh` plus their systemd units, enabled.
+2. Boot from the USB stick in **UEFI mode, not legacy/CSM**. The install
+   partitions an EFI system partition on `OAK_SSD` and grub is installed
+   against that ESP (see `usb/user-data.tmpl`'s `grub_device: true`) -- a
+   legacy/CSM boot won't find a GPT+ESP layout to boot from afterward.
+3. The install itself is unattended: expect ~10 minutes and one reboot. It
+   partitions `OAK_SSD` (EFI + root, mounted at `/`) and `OAK_HDD` (mounted
+   at `/var/lib/oak/backups`), and stages `oakd`/`oak-init`/`oak-backup.sh`
+   plus their systemd units (`oakd`, `oak-backup.timer`, `oak-firstboot`),
+   enabled but not yet run.
 
 ## After the reboot
 
+On first boot, `oak-firstboot.service` runs `/opt/oak/host-setup.sh`
+automatically (its `OAK_DOMAIN` was baked in from the `OAK_DOMAIN` you set
+when running `make usb`, via `/etc/oak/firstboot.env`) -- downloading
+Firecracker and the guest kernel, generating the `age` secrets key, bringing
+up the `oak0` bridge and nftables rules, and starting the local registry and
+`cloudflared` binary download. This can take a few minutes depending on the
+box's internet connection; it then restarts `oakd` and marks itself done
+(`/etc/oak/.setup-done`) so it never re-runs.
+
 ```bash
 ssh oak@<box-ip>
+journalctl -u oak-firstboot   # confirm it completed; re-run `sudo systemctl restart oak-firstboot` if it failed
 sudo cloudflared tunnel login
 sudo cloudflared tunnel create oak
 ```

@@ -63,6 +63,10 @@ func (a *API) AuthMiddleware(next http.Handler) http.Handler {
 // the last stored config -- see resolveConfig.
 func (a *API) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	if !appconfig.ValidName(name) {
+		http.Error(w, fmt.Sprintf("invalid app name %q", name), http.StatusBadRequest)
+		return
+	}
 	var body struct {
 		Image  string `json:"image"`
 		Config string `json:"config"`
@@ -127,6 +131,10 @@ func (a *API) resolveConfig(name, tomlText string) (*appconfig.Config, error) {
 
 func (a *API) handleMachines(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	if !appconfig.ValidName(name) {
+		http.Error(w, fmt.Sprintf("invalid app name %q", name), http.StatusBadRequest)
+		return
+	}
 	machines, err := a.Store.MachinesForApp(name)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -140,6 +148,10 @@ func (a *API) handleMachines(w http.ResponseWriter, r *http.Request) {
 // ?follow=1 it tails the file until the client disconnects.
 func (a *API) handleLogs(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	if !appconfig.ValidName(name) {
+		http.Error(w, fmt.Sprintf("invalid app name %q", name), http.StatusBadRequest)
+		return
+	}
 	machines, err := a.Store.MachinesForApp(name)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -149,8 +161,8 @@ func (a *API) handleLogs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no machines for app "+name, http.StatusNotFound)
 		return
 	}
-	// MachinesForApp orders by created_at ascending; the most recent is last.
-	m := machines[len(machines)-1]
+	// MachinesForApp orders by created_at descending; the most recent is first.
+	m := machines[0]
 	logPath := filepath.Join(a.Deployer.LogDir, name, m.ID+".log")
 
 	f, err := os.Open(logPath)
@@ -193,6 +205,10 @@ func (a *API) handleLogs(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handleSecrets(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	if !appconfig.ValidName(name) {
+		http.Error(w, fmt.Sprintf("invalid app name %q", name), http.StatusBadRequest)
+		return
+	}
 	var body map[string]string
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -220,6 +236,10 @@ func (a *API) handleSecrets(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handleCreateVolume(w http.ResponseWriter, r *http.Request) {
 	app := r.PathValue("name")
+	if !appconfig.ValidName(app) {
+		http.Error(w, fmt.Sprintf("invalid app name %q", app), http.StatusBadRequest)
+		return
+	}
 	var body struct {
 		Name   string `json:"name"`
 		SizeGB int    `json:"size_gb"`
@@ -230,6 +250,12 @@ func (a *API) handleCreateVolume(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Name == "" || body.SizeGB <= 0 {
 		http.Error(w, "name and a positive size_gb are required", http.StatusBadRequest)
+		return
+	}
+	// body.Name becomes part of a filesystem path below (dir/<app>-<name>.img);
+	// reject anything that isn't a plain app-style name before it gets there.
+	if !appconfig.ValidName(body.Name) {
+		http.Error(w, fmt.Sprintf("invalid volume name %q", body.Name), http.StatusBadRequest)
 		return
 	}
 
