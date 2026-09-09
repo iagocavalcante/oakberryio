@@ -12,7 +12,7 @@
 #   DEV                macOS disk to write the finished ISO to, e.g.
 #                      /dev/disk4 -- NEVER touched unless this is set; see
 #                      docs/usb.md for how to find the right one
-#   OAK_UBUNTU_VERSION Ubuntu point release, default 24.04.1
+#   OAK_UBUNTU_VERSION Ubuntu point release, default 24.04.4
 set -euo pipefail
 
 : "${OAK_HOSTNAME:?set OAK_HOSTNAME}"
@@ -20,8 +20,8 @@ set -euo pipefail
 : "${OAK_DOMAIN:?set OAK_DOMAIN}"
 : "${OAK_PASSWORD_HASH:?set OAK_PASSWORD_HASH}"
 
-UBUNTU_VERSION="${OAK_UBUNTU_VERSION:-24.04.1}"
-UBUNTU_SERIES="${UBUNTU_VERSION%.*}" # 24.04.1 -> 24.04
+UBUNTU_VERSION="${OAK_UBUNTU_VERSION:-24.04.4}"
+UBUNTU_SERIES="${UBUNTU_VERSION%.*}" # 24.04.4 -> 24.04
 ISO_NAME="ubuntu-${UBUNTU_VERSION}-live-server-amd64.iso"
 ISO_URL="https://releases.ubuntu.com/${UBUNTU_SERIES}/${ISO_NAME}"
 SUMS_URL="https://releases.ubuntu.com/${UBUNTU_SERIES}/SHA256SUMS"

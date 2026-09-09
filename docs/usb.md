@@ -28,7 +28,7 @@ brew install xorriso coreutils gettext
 | `OAK_DOMAIN` | `apps.example.com` | apps domain (see docs/host.md) |
 | `OAK_PASSWORD_HASH` | `$(openssl passwd -6)` | hashed password for the `oak` user |
 
-Optional: `OAK_UBUNTU_VERSION` (default `24.04.1`), `DEV` (a macOS disk
+Optional: `OAK_UBUNTU_VERSION` (default `24.04.4`), `DEV` (a macOS disk
 identifier -- see below; the script never touches a disk unless this is
 set).
 
