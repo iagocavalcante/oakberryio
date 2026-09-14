@@ -5,10 +5,10 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"os"
 	"os/exec"
 
@@ -17,6 +17,31 @@ import (
 
 	"github.com/iagocavalcante/oakberryio/internal/mmds"
 )
+
+// setupPTY mounts a devpts instance and points /dev/ptmx at it so PTY
+// allocation (creack/pty, used by the ssh agent) works: devtmpfs alone does
+// not provide a usable /dev/ptmx. Best-effort -- run() logs and continues on
+// failure, since an app that never uses `oak ssh` must still boot.
+func setupPTY() error {
+	if err := os.MkdirAll("/dev/pts", 0755); err != nil {
+		return fmt.Errorf("mkdir /dev/pts: %w", err)
+	}
+	if err := unix.Mount("devpts", "/dev/pts", "devpts", 0, "mode=0620,ptmxmode=0666"); err != nil && !errors.Is(err, unix.EBUSY) {
+		return fmt.Errorf("mount devpts: %w", err)
+	}
+	// A non-symlink /dev/ptmx (e.g. devtmpfs's own char node) isn't backed by
+	// our devpts instance; replace it with a symlink to pts/ptmx so opening
+	// /dev/ptmx allocates a master from this instance.
+	if fi, err := os.Lstat("/dev/ptmx"); err == nil && fi.Mode()&os.ModeSymlink == 0 {
+		if err := os.Remove("/dev/ptmx"); err != nil {
+			return fmt.Errorf("remove /dev/ptmx: %w", err)
+		}
+	}
+	if err := os.Symlink("pts/ptmx", "/dev/ptmx"); err != nil && !errors.Is(err, os.ErrExist) {
+		return fmt.Errorf("symlink /dev/ptmx: %w", err)
+	}
+	return nil
+}
 
 // sshAgentPort is the AF_VSOCK port this agent listens on for `oak ssh`.
 // Must match internal/daemon/ssh.go's sshAgentPort constant on the host
@@ -64,33 +89,25 @@ func runSSHAgent(guest mmds.Guest) {
 			log.Printf("oak-init: ssh agent: accept: %v", err)
 			return
 		}
-		conn, err := vsockConn(nfd)
-		if err != nil {
-			log.Printf("oak-init: ssh agent: wrap accepted conn: %v", err)
+		// Wrap the accepted fd as an *os.File and use it directly as an
+		// io.ReadWriteCloser: net.FileConn does not support AF_VSOCK (it
+		// rejects the socket family with "protocol not supported"), and the
+		// agent only ever needs Read/Write/Close on the connection anyway.
+		conn := os.NewFile(uintptr(nfd), "oak-ssh-conn")
+		if conn == nil {
+			log.Printf("oak-init: ssh agent: wrap accepted fd %d failed", nfd)
+			_ = unix.Close(nfd)
 			continue
 		}
 		go handleSSHConn(conn, guest)
 	}
 }
 
-// vsockConn wraps a raw accepted vsock file descriptor as a net.Conn.
-// net.FileConn dups fd internally, so the *os.File used to build it is
-// closed right away without affecting the returned conn.
-func vsockConn(fd int) (net.Conn, error) {
-	f := os.NewFile(uintptr(fd), "oak-ssh-conn")
-	conn, err := net.FileConn(f)
-	_ = f.Close()
-	if err != nil {
-		return nil, fmt.Errorf("file conn: %w", err)
-	}
-	return conn, nil
-}
-
 // handleSSHConn services one accepted `oak ssh` connection: it reads the
 // JSON header, allocates a PTY, runs the requested command (default a
 // shell) with the app's own environment, and copies bytes between conn and
 // the PTY until the command exits or the client disconnects.
-func handleSSHConn(conn net.Conn, guest mmds.Guest) {
+func handleSSHConn(conn *os.File, guest mmds.Guest) {
 	defer conn.Close()
 
 	reader := bufio.NewReader(conn)

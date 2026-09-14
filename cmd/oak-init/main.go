@@ -108,6 +108,13 @@ func run() error {
 		return fmt.Errorf("build argv: %w", err)
 	}
 
+	// PTY support for `oak ssh` needs a devpts mount and /dev/ptmx. Best-
+	// effort: an app that never uses oak ssh must still boot, so a failure
+	// here is logged, not fatal.
+	if err := setupPTY(); err != nil {
+		fmt.Fprintf(os.Stderr, "oak-init: pty setup (oak ssh unavailable): %v\n", err)
+	}
+
 	// The ssh agent must run for the whole machine's lifetime, concurrently
 	// with the app -- not block waiting for it -- so it starts as its own
 	// goroutine right before runChild, which blocks until the app exits.
