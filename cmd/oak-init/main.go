@@ -174,6 +174,14 @@ func mountAll() error {
 			return fmt.Errorf("mkdir %s: %w", m.target, err)
 		}
 		if err := unix.Mount(m.source, m.target, m.fstype, 0, ""); err != nil {
+			// The Firecracker guest kernel is built with CONFIG_DEVTMPFS_MOUNT=y,
+			// so it auto-mounts devtmpfs on /dev during boot; re-mounting the same
+			// fstype on an already-mounted target then returns EBUSY. That target
+			// is already set up exactly as we want, so treat "already mounted" as
+			// success rather than a fatal error.
+			if errors.Is(err, unix.EBUSY) {
+				continue
+			}
 			return fmt.Errorf("mount %s on %s: %w", m.fstype, m.target, err)
 		}
 	}

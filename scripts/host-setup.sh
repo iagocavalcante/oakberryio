@@ -45,6 +45,16 @@ N
 systemctl enable --now systemd-networkd
 networkctl reload
 
+# `networkctl reload` re-reads every .network file (including netplan's for the
+# uplink), which tears down and rebuilds the uplink's DNS for a few seconds --
+# during that window name resolution fails, and the download steps below would
+# die with "Could not resolve host". Wait for resolution to recover before
+# proceeding rather than racing it.
+for _ in $(seq 1 30); do
+  getent hosts github.com >/dev/null 2>&1 && break
+  sleep 1
+done
+
 # nftables: Docker manages its own nftables/iptables state (including a
 # FORWARD DROP policy), so this must not `flush ruleset` -- that would wipe
 # Docker's rules on every idempotent re-run -- and oak0's forwarded traffic
@@ -106,13 +116,21 @@ N
 systemctl daemon-reload
 systemctl enable --now oak-docker-forward.service
 
-# local registry
-docker ps -q -f name=oak-registry | grep -q . || \
+# local registry -- idempotent across all container states: `docker ps` lists
+# only *running* containers, so a stopped-but-existing oak-registry would fall
+# through to `docker run --name oak-registry` and fail with a name conflict.
+# Match on the exact name against *all* containers and start-or-run accordingly.
+if [ -n "$(docker ps -q -f name='^oak-registry$')" ]; then
+  :  # already running
+elif [ -n "$(docker ps -aq -f name='^oak-registry$')" ]; then
+  docker start oak-registry
+else
   docker run -d --restart=always --name oak-registry -p 127.0.0.1:5000:5000 -v /var/lib/oak/registry:/var/lib/registry registry:2
+fi
 
 # cloudflared
 if ! command -v cloudflared >/dev/null; then
-  curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
+  curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
   chmod +x /usr/local/bin/cloudflared
 fi
 echo "DONE. Next: cloudflared tunnel login && cloudflared tunnel create oak, then put tunnel id in /etc/oak/oakd.toml"
