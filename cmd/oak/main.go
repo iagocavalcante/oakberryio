@@ -157,13 +157,32 @@ func runStatus(args []string) error {
 	return w.Flush()
 }
 
+// parseFlagsAnywhere parses fs but, unlike a bare fs.Parse, allows flags to
+// appear before or after positional arguments (Go's flag package otherwise
+// stops parsing at the first non-flag token, so `oak destroy app -y` would
+// silently drop the -y). It returns the positional arguments in order.
+func parseFlagsAnywhere(fs *flag.FlagSet, args []string) ([]string, error) {
+	var positional []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		if fs.NArg() == 0 {
+			return positional, nil
+		}
+		positional = append(positional, fs.Arg(0))
+		args = fs.Args()[1:]
+	}
+}
+
 func runLogs(args []string) error {
 	fs := flag.NewFlagSet("logs", flag.ExitOnError)
 	follow := fs.Bool("f", false, "follow log output")
-	if err := fs.Parse(args); err != nil {
+	pos, err := parseFlagsAnywhere(fs, args)
+	if err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
+	if len(pos) != 1 {
 		return fmt.Errorf("usage: oak logs <app> [-f]")
 	}
 
@@ -171,7 +190,7 @@ func runLogs(args []string) error {
 	if err != nil {
 		return err
 	}
-	return client.Logs(context.Background(), fs.Arg(0), *follow, os.Stdout)
+	return client.Logs(context.Background(), pos[0], *follow, os.Stdout)
 }
 
 func runSecrets(args []string) error {
@@ -243,10 +262,11 @@ func runScale(args []string) error {
 	fs := flag.NewFlagSet("scale", flag.ExitOnError)
 	memory := fs.String("memory", "", "memory size, e.g. 1gb, 512mb, or a bare integer for MB")
 	cpus := fs.Int("cpus", 0, "number of vCPUs")
-	if err := fs.Parse(args); err != nil {
+	pos, err := parseFlagsAnywhere(fs, args)
+	if err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
+	if len(pos) != 1 {
 		return fmt.Errorf("usage: oak scale <app> [--memory 1gb] [--cpus 2]")
 	}
 	if *memory == "" && *cpus == 0 {
@@ -266,17 +286,18 @@ func runScale(args []string) error {
 	if err != nil {
 		return err
 	}
-	return client.Scale(context.Background(), fs.Arg(0), memoryMB, *cpus, os.Stdout)
+	return client.Scale(context.Background(), pos[0], memoryMB, *cpus, os.Stdout)
 }
 
 // runDestroy tears down an app entirely. Refuses to run without -y.
 func runDestroy(args []string) error {
 	fs := flag.NewFlagSet("destroy", flag.ExitOnError)
 	yes := fs.Bool("y", false, "confirm destruction")
-	if err := fs.Parse(args); err != nil {
+	pos, err := parseFlagsAnywhere(fs, args)
+	if err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
+	if len(pos) != 1 {
 		return fmt.Errorf("usage: oak destroy <app> -y")
 	}
 	if !*yes {
@@ -287,7 +308,7 @@ func runDestroy(args []string) error {
 	if err != nil {
 		return err
 	}
-	return client.Destroy(context.Background(), fs.Arg(0))
+	return client.Destroy(context.Background(), pos[0])
 }
 
 func runVolumes(args []string) error {
