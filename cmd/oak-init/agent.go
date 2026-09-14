@@ -18,11 +18,14 @@ import (
 	"github.com/iagocavalcante/oakberryio/internal/mmds"
 )
 
-// setupPTY mounts a devpts instance and points /dev/ptmx at it so PTY
-// allocation (creack/pty, used by the ssh agent) works: devtmpfs alone does
-// not provide a usable /dev/ptmx. Best-effort -- run() logs and continues on
-// failure, since an app that never uses `oak ssh` must still boot.
-func setupPTY() error {
+// setupDev completes the minimal /dev that devtmpfs provides so ordinary
+// programs work: a devpts instance with a usable /dev/ptmx (PTYs, for the
+// ssh agent), and the standard /dev/fd, /dev/stdin, /dev/stdout, /dev/stderr
+// symlinks into /proc (needed by anything using shell process substitution
+// -- e.g. Postgres's initdb, which otherwise fails with `could not open file
+// "/dev/fd/63"`). Best-effort -- run() logs and continues on failure, since
+// an app that needs none of this must still boot.
+func setupDev() error {
 	if err := os.MkdirAll("/dev/pts", 0755); err != nil {
 		return fmt.Errorf("mkdir /dev/pts: %w", err)
 	}
@@ -39,6 +42,23 @@ func setupPTY() error {
 	}
 	if err := os.Symlink("pts/ptmx", "/dev/ptmx"); err != nil && !errors.Is(err, os.ErrExist) {
 		return fmt.Errorf("symlink /dev/ptmx: %w", err)
+	}
+
+	// Standard fd symlinks into /proc (mounted by mountAll). Missing these
+	// breaks any program relying on /dev/fd or /dev/std{in,out,err}.
+	fdLinks := map[string]string{
+		"/dev/fd":     "/proc/self/fd",
+		"/dev/stdin":  "/proc/self/fd/0",
+		"/dev/stdout": "/proc/self/fd/1",
+		"/dev/stderr": "/proc/self/fd/2",
+	}
+	for link, target := range fdLinks {
+		if _, err := os.Lstat(link); err == nil {
+			continue // already present (devtmpfs may provide some)
+		}
+		if err := os.Symlink(target, link); err != nil && !errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("symlink %s -> %s: %w", link, target, err)
+		}
 	}
 	return nil
 }
@@ -127,8 +147,12 @@ func handleSSHConn(conn *os.File, guest mmds.Guest) {
 		argv = []string{"/bin/sh"}
 	}
 
+	// Set PATH (via childEnv) before exec.Command resolves a bare argv[0]:
+	// exec.Command's LookPath reads this process's PATH, not cmd.Env, so a
+	// bare command like `psql` must have PATH in place first.
+	env := childEnv(guest)
 	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Env = childEnv(guest)
+	cmd.Env = env
 	cmd.Dir = guest.WorkingDir
 
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: hdr.Rows, Cols: hdr.Cols})

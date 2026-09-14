@@ -108,11 +108,12 @@ func run() error {
 		return fmt.Errorf("build argv: %w", err)
 	}
 
-	// PTY support for `oak ssh` needs a devpts mount and /dev/ptmx. Best-
-	// effort: an app that never uses oak ssh must still boot, so a failure
-	// here is logged, not fatal.
-	if err := setupPTY(); err != nil {
-		fmt.Fprintf(os.Stderr, "oak-init: pty setup (oak ssh unavailable): %v\n", err)
+	// Complete /dev (devpts + /dev/ptmx for oak ssh's PTYs, and the standard
+	// /dev/fd and /dev/std* symlinks programs like Postgres's initdb need).
+	// Best-effort: an app that needs none of this must still boot, so a
+	// failure here is logged, not fatal.
+	if err := setupDev(); err != nil {
+		fmt.Fprintf(os.Stderr, "oak-init: dev setup incomplete: %v\n", err)
 	}
 
 	// The ssh agent must run for the whole machine's lifetime, concurrently
@@ -402,8 +403,14 @@ func childEnv(guest mmds.Guest) []string {
 // blocks until it exits. It reaps every reparented zombie along the way, as
 // PID 1 must, but only reports the exit status of the direct child.
 func runChild(argv []string, guest mmds.Guest) (int, error) {
+	// childEnv sets this process's PATH before exec.Command resolves a bare
+	// argv[0] via LookPath (which reads the parent's PATH, not cmd.Env). It
+	// must run first: a relative entrypoint like the postgres image's
+	// "docker-entrypoint.sh" would otherwise be looked up against PID 1's
+	// empty PATH and fail with "executable file not found".
+	env := childEnv(guest)
 	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Env = childEnv(guest)
+	cmd.Env = env
 	cmd.Dir = guest.WorkingDir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stdout
