@@ -35,6 +35,15 @@ type Spec struct {
 	CPUs      int64
 	LogPath   string // guest serial console (ttyS0) output file
 	SocketDir string // directory for the Firecracker API socket
+
+	// VsockUDS is the host-side Unix-domain socket path Firecracker exposes
+	// for this machine's vsock device (host<->guest bridge for `oak ssh`,
+	// see internal/daemon/api.go's handleSSH). Empty means no vsock device.
+	VsockUDS string
+	// GuestCID is the vsock device's 32-bit guest Context Identifier; oakd
+	// always sets this to 3 (the lowest CID not reserved for the hypervisor
+	// or host, see vsock(7)) alongside VsockUDS.
+	GuestCID uint32
 }
 
 // MACFromIP deterministically derives a locally-administered MAC address

@@ -208,6 +208,8 @@ func (d *Daemon) reconcileOne(ctx context.Context, m store.Machine) error {
 		CPUs:      int64(cfg.VM.CPUs),
 		LogPath:   filepath.Join(logDir, m.ID+".log"),
 		SocketDir: d.Deployer.socketDir(),
+		VsockUDS:  vsockSocketPath(d.Deployer.socketDir(), m.ID),
+		GuestCID:  vsockGuestCID,
 	}
 	guest := mmds.Guest{
 		MachineID:  m.ID,
@@ -227,6 +229,9 @@ func (d *Daemon) reconcileOne(ctx context.Context, m store.Machine) error {
 	// Config.Validate before Start ever gets to boot anything.
 	if err := os.Remove(filepath.Join(d.Deployer.socketDir(), m.ID+".sock")); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove stale socket for %s: %w", m.ID, err)
+	}
+	if err := os.Remove(spec.VsockUDS); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove stale vsock socket for %s: %w", m.ID, err)
 	}
 
 	// Same BaseCtx reasoning as Deploy: this must outlive Reconcile's own

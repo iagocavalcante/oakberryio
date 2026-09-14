@@ -5,11 +5,13 @@ go 1.25.7
 require (
 	filippo.io/age v1.3.2
 	github.com/BurntSushi/toml v1.6.0
+	github.com/creack/pty v1.1.24
 	github.com/firecracker-microvm/firecracker-go-sdk v1.0.0
 	github.com/google/go-containerregistry v0.22.1
 	github.com/miekg/dns v1.1.73
 	github.com/vishvananda/netlink v1.3.1
 	golang.org/x/sys v0.47.0
+	golang.org/x/term v0.45.0
 	modernc.org/sqlite v1.58.0
 )
 

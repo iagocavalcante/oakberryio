@@ -39,6 +39,7 @@ func (a *API) Mux() *http.ServeMux {
 	mux.HandleFunc("GET /apps/{name}/secrets", a.handleListSecrets)
 	mux.HandleFunc("DELETE /apps/{name}/secrets", a.handleUnsetSecrets)
 	mux.HandleFunc("POST /apps/{name}/volumes", a.handleCreateVolume)
+	mux.HandleFunc("POST /apps/{name}/ssh", a.handleSSH)
 	mux.HandleFunc("GET /apps", a.handleApps)
 	return mux
 }
@@ -425,6 +426,69 @@ func (a *API) handleCreateVolume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusCreated)
+}
+
+// handleSSH bridges a raw duplex connection from the CLI to app's running
+// machine over its Firecracker vsock device, for `oak ssh`. Unlike every
+// other handler here, the response is a hijacked raw connection, not a
+// normal HTTP response: see docs/plans/2026-09-14-ssh-and-stateful-design.md
+// and internal/cli's Ssh client method for the wire contract on the other
+// end.
+//
+// The vsock dial and CONNECT handshake happen before the hijack so a
+// failure up to that point can still be reported as a normal HTTP error;
+// once hijacked and the "200 OK" status line is on the wire, any further
+// failure can only be reported as a line of text on the stream itself.
+func (a *API) handleSSH(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if !appconfig.ValidName(name) {
+		http.Error(w, fmt.Sprintf("invalid app name %q", name), http.StatusBadRequest)
+		return
+	}
+
+	machines, err := a.Store.MachinesForApp(name)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var running *store.Machine
+	for i := range machines {
+		if machines[i].State == "running" {
+			running = &machines[i]
+			break
+		}
+	}
+	if running == nil {
+		http.Error(w, "no running machine for app "+name, http.StatusNotFound)
+		return
+	}
+
+	vsockConn, err := dialVsock(vsockSocketPath(a.Deployer.socketDir(), running.ID), sshAgentPort)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("connect to guest agent: %v", err), http.StatusBadGateway)
+		return
+	}
+
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		vsockConn.Close()
+		http.Error(w, "connection does not support hijacking", http.StatusInternalServerError)
+		return
+	}
+	clientConn, _, err := hijacker.Hijack()
+	if err != nil {
+		vsockConn.Close()
+		http.Error(w, fmt.Sprintf("hijack: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	if _, err := clientConn.Write([]byte("HTTP/1.1 200 OK\r\n\r\n")); err != nil {
+		vsockConn.Close()
+		clientConn.Close()
+		return
+	}
+
+	bridge(clientConn, vsockConn)
 }
 
 func (a *API) handleApps(w http.ResponseWriter, r *http.Request) {

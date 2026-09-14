@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -300,6 +301,73 @@ func (c *Client) SetSecrets(ctx context.Context, app string, kv map[string]strin
 	}
 	return nil
 }
+
+// SSH opens a raw duplex connection to app's guest agent through oakd's
+// vsock bridge (POST /apps/{name}/ssh, see internal/daemon/api.go's
+// handleSSH) and returns it once the request has been accepted. The
+// std http.Client hands back a Response, not the hijacked connection's raw
+// duplex stream, so this speaks just enough HTTP/1.1 by hand: send the
+// request line and headers over a raw Transport.Dial connection, then read
+// up to the blank line ending the response headers and check the status is
+// 200. From the point this returns, the connection is the raw
+// JSON-header-then-PTY stream the wire protocol describes -- the caller
+// (cmd/oak's runSSH) owns everything past here.
+func (c *Client) SSH(ctx context.Context, app string) (net.Conn, error) {
+	conn, err := c.Dial(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("dial: %w", err)
+	}
+
+	host := "unix"
+	if u, err := url.Parse(c.BaseURL); err == nil && u.Host != "" {
+		host = u.Host
+	}
+	var req strings.Builder
+	fmt.Fprintf(&req, "POST /apps/%s/ssh HTTP/1.1\r\n", url.PathEscape(app))
+	fmt.Fprintf(&req, "Host: %s\r\n", host)
+	if c.Token != "" {
+		fmt.Fprintf(&req, "Authorization: Bearer %s\r\n", c.Token)
+	}
+	req.WriteString("Content-Length: 0\r\n\r\n")
+	if _, err := io.WriteString(conn, req.String()); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("send ssh request: %w", err)
+	}
+
+	reader := bufio.NewReader(conn)
+	statusLine, err := reader.ReadString('\n')
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("read ssh response status: %w", err)
+	}
+	if fields := strings.Fields(statusLine); len(fields) < 2 || fields[1] != "200" {
+		conn.Close()
+		return nil, fmt.Errorf("ssh %s: unexpected status %q", app, strings.TrimSpace(statusLine))
+	}
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("read ssh response headers: %w", err)
+		}
+		if strings.TrimSpace(line) == "" {
+			break
+		}
+	}
+
+	return &bufferedConn{Conn: conn, r: reader}, nil
+}
+
+// bufferedConn is a net.Conn whose Read is served from a bufio.Reader
+// wrapping the same connection, so bytes the reader buffered while parsing
+// the HTTP response's status line and headers (see Client.SSH) aren't lost
+// to a later raw Read on the underlying conn.
+type bufferedConn struct {
+	net.Conn
+	r *bufio.Reader
+}
+
+func (c *bufferedConn) Read(p []byte) (int, error) { return c.r.Read(p) }
 
 // CreateVolume provisions a new volume for app.
 func (c *Client) CreateVolume(ctx context.Context, app, name string, sizeGB int) error {

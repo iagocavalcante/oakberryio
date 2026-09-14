@@ -59,6 +59,21 @@ type Checker interface {
 	Healthy(ctx context.Context, ip string, port int, path string) error
 }
 
+// vsockGuestCID is the guest Context Identifier oakd assigns every
+// machine's vsock device. All machines use the same CID: each one is a
+// separate Firecracker process with its own vsock namespace (the host UDS
+// path, not the CID, is what makes one machine's vsock device distinct from
+// another's), so there is no need to allocate a unique CID per machine.
+const vsockGuestCID uint32 = 3
+
+// vsockSocketPath returns the host-side Unix-domain socket path Firecracker
+// exposes for machine id's vsock device, given oakd's socket directory. Used
+// both when booting a machine (vm.Spec.VsockUDS) and by the ssh bridge
+// (handleSSH) to dial it.
+func vsockSocketPath(socketDir, id string) string {
+	return filepath.Join(socketDir, id+"_vsock.sock")
+}
+
 // releaseCmd is the JSON encoding written to the releases.cmd column: the
 // image's entrypoint and cmd kept as separate slices (rather than a single
 // concatenated one) so an empty entrypoint round-trips distinctly from an
@@ -275,6 +290,8 @@ func (d *Deployer) bootFromRelease(ctx context.Context, cfg *appconfig.Config, r
 		CPUs:      int64(cfg.VM.CPUs),
 		LogPath:   logPath,
 		SocketDir: d.socketDir(),
+		VsockUDS:  vsockSocketPath(d.socketDir(), id),
+		GuestCID:  vsockGuestCID,
 	}
 
 	// A leftover socket file at this machine ID's path (e.g. from a previous
@@ -283,6 +300,9 @@ func (d *Deployer) bootFromRelease(ctx context.Context, cfg *appconfig.Config, r
 	// already exists" before it ever tries to boot.
 	if err := os.Remove(filepath.Join(d.socketDir(), id+".sock")); err != nil && !os.IsNotExist(err) {
 		return "", fmt.Errorf("remove stale socket for %s: %w", id, err)
+	}
+	if err := os.Remove(spec.VsockUDS); err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("remove stale vsock socket for %s: %w", id, err)
 	}
 
 	emit("starting machine...\n")

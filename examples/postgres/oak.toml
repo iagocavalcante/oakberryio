@@ -1,0 +1,22 @@
+app = "pg"
+
+[build]
+dockerfile = "Dockerfile"
+
+[env]
+# A subdirectory of the mount, not the mount root: a freshly formatted
+# volume contains ext4's own lost+found, which makes Postgres see a
+# non-empty data dir and refuse to initdb. See docs/postgres.md.
+PGDATA = "/var/lib/postgresql/data/pgdata"
+
+[[mounts]]
+volume = "pgdata"
+destination = "/var/lib/postgresql/data"
+
+[[services]]
+internal_port = 5432
+# No check.path: Postgres speaks no HTTP, so this gets a TCP-connect health
+# check instead (see internal/daemon/checker.go).
+
+[vm]
+memory_mb = 512

@@ -6,14 +6,18 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
 	"text/tabwriter"
 	"time"
+
+	"golang.org/x/term"
 
 	"github.com/iagocavalcante/oakberryio/internal/appconfig"
 	"github.com/iagocavalcante/oakberryio/internal/cli"
@@ -45,6 +49,8 @@ func main() {
 		err = runScale(os.Args[2:])
 	case "destroy", "rm":
 		err = runDestroy(os.Args[2:])
+	case "ssh":
+		err = runSSH(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -69,7 +75,8 @@ commands:
   secrets set <app> KEY=VALUE...
   secrets list <app>
   secrets unset <app> KEY...
-  volumes create <app> <name> <size_gb>`)
+  volumes create <app> <name> <size_gb>
+  ssh <app> [-- cmd args...]`)
 }
 
 // runDeploy builds the app's image with docker, pushes it to OAK_REGISTRY
@@ -309,6 +316,74 @@ func runDestroy(args []string) error {
 		return err
 	}
 	return client.Destroy(context.Background(), pos[0])
+}
+
+// sshHeader is the single JSON line sent right after the HTTP handshake;
+// must match cmd/oak-init/agent.go's sshHeader struct on the guest side.
+type sshHeader struct {
+	Cmd  []string `json:"cmd"`
+	Rows uint16   `json:"rows"`
+	Cols uint16   `json:"cols"`
+}
+
+// runSSH opens an interactive shell (or runs a one-off command) inside
+// app's running machine, over oakd's vsock bridge. Everything after "--"
+// becomes the command to run in the guest; with no "--" it defaults to an
+// interactive shell. See docs/plans/2026-09-14-ssh-and-stateful-design.md.
+func runSSH(args []string) error {
+	appArgs := args
+	var cmdArgs []string
+	for i, a := range args {
+		if a == "--" {
+			appArgs, cmdArgs = args[:i], args[i+1:]
+			break
+		}
+	}
+	if len(appArgs) != 1 {
+		return fmt.Errorf("usage: oak ssh <app> [-- cmd args...]")
+	}
+
+	client, err := cli.NewClient()
+	if err != nil {
+		return err
+	}
+	conn, err := client.SSH(context.Background(), appArgs[0])
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	// Only put the terminal in raw mode (and only report a real size) when
+	// stdin actually is one -- oak ssh app -- some-command may be piped.
+	rows, cols := 24, 80
+	stdinFD := int(os.Stdin.Fd())
+	if term.IsTerminal(stdinFD) {
+		if w, h, err := term.GetSize(stdinFD); err == nil {
+			cols, rows = w, h
+		}
+		oldState, err := term.MakeRaw(stdinFD)
+		if err != nil {
+			return fmt.Errorf("set terminal raw mode: %w", err)
+		}
+		defer term.Restore(stdinFD, oldState)
+	}
+
+	header, err := json.Marshal(sshHeader{Cmd: cmdArgs, Rows: uint16(rows), Cols: uint16(cols)})
+	if err != nil {
+		return fmt.Errorf("marshal ssh header: %w", err)
+	}
+	if _, err := conn.Write(append(header, '\n')); err != nil {
+		return fmt.Errorf("send ssh header: %w", err)
+	}
+
+	// The stdin->conn copy runs in its own goroutine since it blocks on
+	// terminal input; once the session ends (conn->stdout below returns,
+	// e.g. the remote command exited) the process exits and takes that
+	// goroutine with it -- live resize (SIGWINCH) and a clean join here are
+	// both out of scope for v1, see the design doc.
+	go func() { _, _ = io.Copy(conn, os.Stdin) }()
+	_, _ = io.Copy(os.Stdout, conn)
+	return nil
 }
 
 func runVolumes(args []string) error {

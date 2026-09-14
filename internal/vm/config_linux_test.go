@@ -171,3 +171,38 @@ func TestBuildConfigInvalidSpecIP(t *testing.T) {
 		t.Fatal("BuildConfig: want error for invalid spec.IP")
 	}
 }
+
+func TestBuildConfigNoVsockWhenUnset(t *testing.T) {
+	spec := testSpec() // testSpec() leaves VsockUDS unset
+	cfg, err := BuildConfig(spec)
+	if err != nil {
+		t.Fatalf("BuildConfig: %v", err)
+	}
+	if len(cfg.VsockDevices) != 0 {
+		t.Errorf("VsockDevices = %+v, want none", cfg.VsockDevices)
+	}
+}
+
+func TestBuildConfigVsockDevice(t *testing.T) {
+	spec := testSpec()
+	spec.VsockUDS = "/run/oak/m1_vsock.sock"
+	spec.GuestCID = 3
+
+	cfg, err := BuildConfig(spec)
+	if err != nil {
+		t.Fatalf("BuildConfig: %v", err)
+	}
+	if len(cfg.VsockDevices) != 1 {
+		t.Fatalf("len(VsockDevices) = %d, want 1", len(cfg.VsockDevices))
+	}
+	dev := cfg.VsockDevices[0]
+	if dev.ID != "vsock0" {
+		t.Errorf("ID = %q, want vsock0", dev.ID)
+	}
+	if dev.Path != spec.VsockUDS {
+		t.Errorf("Path = %q, want %q", dev.Path, spec.VsockUDS)
+	}
+	if dev.CID != spec.GuestCID {
+		t.Errorf("CID = %d, want %d", dev.CID, spec.GuestCID)
+	}
+}

@@ -108,6 +108,13 @@ func run() error {
 		return fmt.Errorf("build argv: %w", err)
 	}
 
+	// The ssh agent must run for the whole machine's lifetime, concurrently
+	// with the app -- not block waiting for it -- so it starts as its own
+	// goroutine right before runChild, which blocks until the app exits.
+	// Best-effort: see runSSHAgent's doc comment for why its failures are
+	// never fatal here.
+	go runSSHAgent(guest)
+
 	code, err := runChild(argv, guest)
 	if err != nil {
 		return fmt.Errorf("run child: %w", err)
@@ -359,27 +366,37 @@ func mountVolumes(guest mmds.Guest) error {
 	return nil
 }
 
-// runChild execs argv as a child of PID 1 (not a replacement of it, since
-// PID 1 must stay alive to reap zombies), forwards SIGTERM/SIGINT to it, and
-// blocks until it exits. It reaps every reparented zombie along the way, as
-// PID 1 must, but only reports the exit status of the direct child.
-func runChild(argv []string, guest mmds.Guest) (int, error) {
+// childEnv sets the process's own PATH (so exec.LookPath can resolve a bare
+// argv[0], see the note below) and returns the environment any child of
+// oak-init should run with: the app's image env plus app-config env and
+// secrets from guest.Env, with PATH seeded as a baseline. Used by runChild
+// for the app's own child, and by the ssh agent (agent.go) for shells it
+// spawns over `oak ssh`, so both see identical environments.
+func childEnv(guest mmds.Guest) []string {
 	// exec.Command resolves a bare argv[0] (no path separator) via
 	// exec.LookPath against THIS process's own os.Getenv("PATH"), not
 	// cmd.Env — setting cmd.Env's PATH has no effect on that lookup. PID 1
-	// boots with no environment at all, so a CMD image like ["nginx"] would
-	// otherwise fail to even start. Set our real PATH first so the lookup
-	// below succeeds, then also seed it into the child's env as a baseline;
-	// guest.Env's own PATH, if the image or app config set one, still wins
-	// there via MergeEnv's override semantics.
+	// boots with no environment at all, so a CMD image like ["nginx"] (or,
+	// for the ssh agent, a bare command like "psql") would otherwise fail to
+	// even start. Set our real PATH first so that lookup succeeds, then also
+	// seed it into the child's env as a baseline; guest.Env's own PATH, if
+	// the image or app config set one, still wins there via MergeEnv's
+	// override semantics.
 	path := guest.Env["PATH"]
 	if path == "" {
 		path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 	}
 	_ = os.Setenv("PATH", path)
+	return mmds.MergeEnv([]string{"PATH=" + path}, guest.Env)
+}
 
+// runChild execs argv as a child of PID 1 (not a replacement of it, since
+// PID 1 must stay alive to reap zombies), forwards SIGTERM/SIGINT to it, and
+// blocks until it exits. It reaps every reparented zombie along the way, as
+// PID 1 must, but only reports the exit status of the direct child.
+func runChild(argv []string, guest mmds.Guest) (int, error) {
 	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Env = mmds.MergeEnv([]string{"PATH=" + path}, guest.Env)
+	cmd.Env = childEnv(guest)
 	cmd.Dir = guest.WorkingDir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stdout

@@ -5,10 +5,12 @@ package cli
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,6 +25,10 @@ type Transport struct {
 	Client  *http.Client
 	BaseURL string
 	Token   string
+
+	// socket is the unix socket path Dial connects to; empty when this
+	// Transport speaks HTTPS instead (OAK_API set).
+	socket string
 }
 
 // NewTransport builds a Transport from the environment.
@@ -47,7 +53,30 @@ func NewTransport() (*Transport, error) {
 			},
 		},
 	}
-	return &Transport{Client: client, BaseURL: "http://unix"}, nil
+	return &Transport{Client: client, BaseURL: "http://unix", socket: socket}, nil
+}
+
+// Dial returns a raw connection to oakd, for endpoints (like `oak ssh`)
+// that need direct duplex byte-stream access the std http.Client won't hand
+// back. Over a unix socket transport this dials the socket directly; over
+// an HTTPS transport this dials TLS to the configured host, matching how
+// http.Transport would connect for a normal request.
+func (t *Transport) Dial(ctx context.Context) (net.Conn, error) {
+	if t.socket != "" {
+		var d net.Dialer
+		return d.DialContext(ctx, "unix", t.socket)
+	}
+
+	u, err := url.Parse(t.BaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse base url %q: %w", t.BaseURL, err)
+	}
+	host := u.Host
+	if _, _, err := net.SplitHostPort(host); err != nil {
+		host = net.JoinHostPort(host, "443")
+	}
+	var d net.Dialer
+	return tls.DialWithDialer(&d, "tcp", host, nil)
 }
 
 // apiToken resolves OAK_TOKEN, falling back to ~/.oak/token.

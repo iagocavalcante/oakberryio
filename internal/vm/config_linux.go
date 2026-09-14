@@ -59,7 +59,7 @@ func BuildConfig(spec Spec) (firecracker.Config, error) {
 		}
 	}
 
-	return firecracker.Config{
+	cfg := firecracker.Config{
 		VMID:            spec.ID,
 		SocketPath:      filepath.Join(spec.SocketDir, spec.ID+".sock"),
 		KernelImagePath: spec.Kernel,
@@ -76,5 +76,16 @@ func BuildConfig(spec Spec) (firecracker.Config, error) {
 			MemSizeMib: firecracker.Int64(spec.MemoryMB),
 		},
 		MmdsVersion: firecracker.MMDSv1,
-	}, nil
+	}
+
+	// VsockUDS is set on every machine oakd boots (see bootFromRelease and
+	// reconcileOne), giving `oak ssh` a host<->guest bridge without needing
+	// its own tap device or IP.
+	if spec.VsockUDS != "" {
+		cfg.VsockDevices = []firecracker.VsockDevice{
+			{ID: "vsock0", Path: spec.VsockUDS, CID: spec.GuestCID},
+		}
+	}
+
+	return cfg, nil
 }
