@@ -299,3 +299,194 @@ func TestVolumesRoundTrip(t *testing.T) {
 		t.Fatalf("volume = %+v", volumes[0])
 	}
 }
+
+func TestLatestReleaseReturnsNewest(t *testing.T) {
+	s := openTemp(t)
+	if err := s.UpsertApp("a", "{}"); err != nil {
+		t.Fatalf("upsert app: %v", err)
+	}
+	if _, err := s.InsertRelease("a", "img:1", "/rootfs/a-1.ext4", `[]`, `[]`, "/"); err != nil {
+		t.Fatalf("insert release 1: %v", err)
+	}
+	rel2ID, err := s.InsertRelease("a", "img:2", "/rootfs/a-2.ext4", `[]`, `[]`, "/")
+	if err != nil {
+		t.Fatalf("insert release 2: %v", err)
+	}
+
+	latest, err := s.LatestRelease("a")
+	if err != nil {
+		t.Fatalf("latest release: %v", err)
+	}
+	if latest.ID != rel2ID || latest.Image != "img:2" {
+		t.Fatalf("latest release = %+v, want id %d image img:2", latest, rel2ID)
+	}
+}
+
+func TestLatestReleaseErrorsWhenAppHasNone(t *testing.T) {
+	s := openTemp(t)
+	if err := s.UpsertApp("a", "{}"); err != nil {
+		t.Fatalf("upsert app: %v", err)
+	}
+	if _, err := s.LatestRelease("a"); err == nil {
+		t.Fatal("want error for app with no releases")
+	}
+}
+
+func TestDeleteSecretRemovesOnlyThatKey(t *testing.T) {
+	s := openTemp(t)
+	if err := s.UpsertApp("a", "{}"); err != nil {
+		t.Fatalf("upsert app: %v", err)
+	}
+	if err := s.PutSecret("a", "FOO", []byte("cipher-foo")); err != nil {
+		t.Fatalf("put secret: %v", err)
+	}
+	if err := s.PutSecret("a", "BAR", []byte("cipher-bar")); err != nil {
+		t.Fatalf("put secret: %v", err)
+	}
+
+	if err := s.DeleteSecret("a", "FOO"); err != nil {
+		t.Fatalf("delete secret: %v", err)
+	}
+
+	secrets, err := s.Secrets("a")
+	if err != nil {
+		t.Fatalf("secrets: %v", err)
+	}
+	if len(secrets) != 1 {
+		t.Fatalf("secrets = %+v, want just BAR", secrets)
+	}
+	if _, ok := secrets["BAR"]; !ok {
+		t.Fatalf("BAR missing after deleting FOO: %+v", secrets)
+	}
+}
+
+// TestDeletePerAppMethodsOnlyRemoveTargetAppsRows covers DeleteReleasesForApp,
+// DeleteSecretsForApp and DeleteVolumesForApp: each must scope its DELETE to
+// the given app and leave a second app's rows of the same kind untouched.
+func TestDeletePerAppMethodsOnlyRemoveTargetAppsRows(t *testing.T) {
+	s := openTemp(t)
+	for _, app := range []string{"a", "b"} {
+		if err := s.UpsertApp(app, "{}"); err != nil {
+			t.Fatalf("upsert app %s: %v", app, err)
+		}
+		if _, err := s.InsertRelease(app, "img:1", "/rootfs/"+app+"-1.ext4", `[]`, `[]`, "/"); err != nil {
+			t.Fatalf("insert release for %s: %v", app, err)
+		}
+		if err := s.PutSecret(app, "FOO", []byte("cipher")); err != nil {
+			t.Fatalf("put secret for %s: %v", app, err)
+		}
+		if err := s.CreateVolume(app, "data", "/volumes/"+app+"-data.img", 5); err != nil {
+			t.Fatalf("create volume for %s: %v", app, err)
+		}
+	}
+
+	if err := s.DeleteReleasesForApp("a"); err != nil {
+		t.Fatalf("delete releases for a: %v", err)
+	}
+	if err := s.DeleteSecretsForApp("a"); err != nil {
+		t.Fatalf("delete secrets for a: %v", err)
+	}
+	if err := s.DeleteVolumesForApp("a"); err != nil {
+		t.Fatalf("delete volumes for a: %v", err)
+	}
+
+	if _, err := s.LatestRelease("a"); err == nil {
+		t.Fatal("want a's releases gone")
+	}
+	if secrets, err := s.Secrets("a"); err != nil || len(secrets) != 0 {
+		t.Fatalf("a's secrets = %+v, err %v, want none", secrets, err)
+	}
+	if volumes, err := s.Volumes("a"); err != nil || len(volumes) != 0 {
+		t.Fatalf("a's volumes = %+v, err %v, want none", volumes, err)
+	}
+
+	if _, err := s.LatestRelease("b"); err != nil {
+		t.Fatalf("b's release should survive: %v", err)
+	}
+	if secrets, err := s.Secrets("b"); err != nil || len(secrets) != 1 {
+		t.Fatalf("b's secrets = %+v, err %v, want 1", secrets, err)
+	}
+	if volumes, err := s.Volumes("b"); err != nil || len(volumes) != 1 {
+		t.Fatalf("b's volumes = %+v, err %v, want 1", volumes, err)
+	}
+}
+
+// TestFullCascadeDeleteLeavesNoOrphans exercises the exact sequence
+// Deployer.Destroy runs (machines, then releases/secrets/volumes, then the
+// app row) and checks nothing is left behind for the destroyed app while a
+// second app is untouched.
+func TestFullCascadeDeleteLeavesNoOrphans(t *testing.T) {
+	s := openTemp(t)
+	for _, app := range []string{"a", "b"} {
+		if err := s.UpsertApp(app, "{}"); err != nil {
+			t.Fatalf("upsert app %s: %v", app, err)
+		}
+		relID, err := s.InsertRelease(app, "img:1", "/rootfs/"+app+"-1.ext4", `[]`, `[]`, "/")
+		if err != nil {
+			t.Fatalf("insert release for %s: %v", app, err)
+		}
+		if _, err := s.AllocAndInsertMachine(app+"-m1", app, relID, "tap-"+app); err != nil {
+			t.Fatalf("insert machine for %s: %v", app, err)
+		}
+		if err := s.SetMachineState(app+"-m1", "running", 111); err != nil {
+			t.Fatalf("set machine state for %s: %v", app, err)
+		}
+		if err := s.PutSecret(app, "FOO", []byte("cipher")); err != nil {
+			t.Fatalf("put secret for %s: %v", app, err)
+		}
+		if err := s.CreateVolume(app, "data", "/volumes/"+app+"-data.img", 5); err != nil {
+			t.Fatalf("create volume for %s: %v", app, err)
+		}
+	}
+
+	// Destroy "a": machines first (FK on apps.name), then the rest.
+	if err := s.DeleteMachine("a-m1"); err != nil {
+		t.Fatalf("delete machine: %v", err)
+	}
+	if err := s.DeleteReleasesForApp("a"); err != nil {
+		t.Fatalf("delete releases: %v", err)
+	}
+	if err := s.DeleteSecretsForApp("a"); err != nil {
+		t.Fatalf("delete secrets: %v", err)
+	}
+	if err := s.DeleteVolumesForApp("a"); err != nil {
+		t.Fatalf("delete volumes: %v", err)
+	}
+	if err := s.DeleteApp("a"); err != nil {
+		t.Fatalf("delete app: %v", err)
+	}
+
+	apps, err := s.Apps()
+	if err != nil {
+		t.Fatalf("apps: %v", err)
+	}
+	if len(apps) != 1 || apps[0] != "b" {
+		t.Fatalf("apps = %v, want just [b]", apps)
+	}
+	if machines, err := s.MachinesForApp("a"); err != nil || len(machines) != 0 {
+		t.Fatalf("a's machines = %+v, err %v, want none", machines, err)
+	}
+	if _, err := s.LatestRelease("a"); err == nil {
+		t.Fatal("want a's releases gone")
+	}
+	if secrets, err := s.Secrets("a"); err != nil || len(secrets) != 0 {
+		t.Fatalf("a's secrets = %+v, err %v, want none", secrets, err)
+	}
+	if volumes, err := s.Volumes("a"); err != nil || len(volumes) != 0 {
+		t.Fatalf("a's volumes = %+v, err %v, want none", volumes, err)
+	}
+
+	// b is fully intact.
+	if machines, err := s.MachinesForApp("b"); err != nil || len(machines) != 1 {
+		t.Fatalf("b's machines = %+v, err %v, want 1", machines, err)
+	}
+	if _, err := s.LatestRelease("b"); err != nil {
+		t.Fatalf("b's release should survive: %v", err)
+	}
+	if secrets, err := s.Secrets("b"); err != nil || len(secrets) != 1 {
+		t.Fatalf("b's secrets = %+v, err %v, want 1", secrets, err)
+	}
+	if volumes, err := s.Volumes("b"); err != nil || len(volumes) != 1 {
+		t.Fatalf("b's volumes = %+v, err %v, want 1", volumes, err)
+	}
+}

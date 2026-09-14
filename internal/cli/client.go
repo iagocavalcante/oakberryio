@@ -92,6 +92,127 @@ func (c *Client) Deploy(ctx context.Context, app, image, tomlText string, out io
 	return nil
 }
 
+// Restart reboots app from its latest release with no rebuild, streaming
+// progress to out exactly like Deploy (see its doc comment for the wire
+// contract).
+func (c *Client) Restart(ctx context.Context, app string, out io.Writer) error {
+	req, err := c.NewRequest(ctx, http.MethodPost, "/apps/"+url.PathEscape(app)+"/restart", nil)
+	if err != nil {
+		return err
+	}
+	return c.streamProgress(req, "restart", app, out)
+}
+
+// Scale resizes app's VM (memory and/or CPU count) and reboots it, streaming
+// progress to out exactly like Deploy. A zero memoryMB or cpus leaves that
+// field unchanged.
+func (c *Client) Scale(ctx context.Context, app string, memoryMB, cpus int, out io.Writer) error {
+	body, err := json.Marshal(struct {
+		MemoryMB int `json:"memory_mb"`
+		CPUs     int `json:"cpus"`
+	}{MemoryMB: memoryMB, CPUs: cpus})
+	if err != nil {
+		return fmt.Errorf("marshal scale request: %w", err)
+	}
+	req, err := c.NewRequest(ctx, http.MethodPost, "/apps/"+url.PathEscape(app)+"/scale", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	return c.streamProgress(req, "scale", app, out)
+}
+
+// streamProgress sends req and streams its response body to out line by
+// line, exactly like Deploy: the HTTP status is always 200 once streaming
+// starts, and the real outcome is the final line ("ok <machine-id>" or
+// "error: <message>").
+func (c *Client) streamProgress(req *http.Request, verb, app string, out io.Writer) error {
+	resp, err := c.Do(req)
+	if err != nil {
+		return fmt.Errorf("%s request: %w", verb, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s %s: %w", verb, app, httpError(resp))
+	}
+
+	var lastLine string
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		fmt.Fprintln(out, line)
+		lastLine = line
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("read %s stream: %w", verb, err)
+	}
+	if strings.HasPrefix(lastLine, "error:") {
+		return fmt.Errorf("%s", lastLine)
+	}
+	return nil
+}
+
+// Destroy tears down app entirely: its machines, all its rows, its on-disk
+// artifacts, and its tunnel route.
+func (c *Client) Destroy(ctx context.Context, app string) error {
+	req, err := c.NewRequest(ctx, http.MethodDelete, "/apps/"+url.PathEscape(app), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		return fmt.Errorf("destroy request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("destroy %s: %w", app, httpError(resp))
+	}
+	return nil
+}
+
+// SecretKeys returns app's secret key names, sorted, never their values.
+func (c *Client) SecretKeys(ctx context.Context, app string) ([]string, error) {
+	req, err := c.NewRequest(ctx, http.MethodGet, "/apps/"+url.PathEscape(app)+"/secrets", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("secrets list request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("secrets list %s: %w", app, httpError(resp))
+	}
+	var keys []string
+	if err := json.NewDecoder(resp.Body).Decode(&keys); err != nil {
+		return nil, fmt.Errorf("decode secrets list response: %w", err)
+	}
+	return keys, nil
+}
+
+// UnsetSecrets deletes the named secret keys for app.
+func (c *Client) UnsetSecrets(ctx context.Context, app string, keys []string) error {
+	body, err := json.Marshal(struct {
+		Keys []string `json:"keys"`
+	}{Keys: keys})
+	if err != nil {
+		return fmt.Errorf("marshal unset secrets request: %w", err)
+	}
+	req, err := c.NewRequest(ctx, http.MethodDelete, "/apps/"+url.PathEscape(app)+"/secrets", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		return fmt.Errorf("unset secrets request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("unset secrets %s: %w", app, httpError(resp))
+	}
+	return nil
+}
+
 // Apps lists every known app.
 func (c *Client) Apps(ctx context.Context) ([]string, error) {
 	req, err := c.NewRequest(ctx, http.MethodGet, "/apps", nil)

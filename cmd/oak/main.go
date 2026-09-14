@@ -1,10 +1,12 @@
 // Command oak is oakberryio's CLI: it builds and pushes an app's image,
-// deploys it, and talks to oakd's status/logs/secrets/volumes API. See
-// docs/host.md and internal/daemon/api.go for the wire contract.
+// deploys it, and talks to oakd's status/logs/restart/scale/destroy/secrets/
+// volumes API. See docs/host.md and internal/daemon/api.go for the wire
+// contract.
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -37,6 +39,12 @@ func main() {
 		err = runSecrets(os.Args[2:])
 	case "volumes":
 		err = runVolumes(os.Args[2:])
+	case "restart":
+		err = runRestart(os.Args[2:])
+	case "scale":
+		err = runScale(os.Args[2:])
+	case "destroy", "rm":
+		err = runDestroy(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -55,7 +63,12 @@ commands:
   apps
   status <app>
   logs <app> [-f]
+  restart <app>
+  scale <app> [--memory 1gb] [--cpus 2]
+  destroy <app> -y   (alias: rm)
   secrets set <app> KEY=VALUE...
+  secrets list <app>
+  secrets unset <app> KEY...
   volumes create <app> <name> <size_gb>`)
 }
 
@@ -162,20 +175,119 @@ func runLogs(args []string) error {
 }
 
 func runSecrets(args []string) error {
-	if len(args) < 3 || args[0] != "set" {
-		return fmt.Errorf("usage: oak secrets set <app> KEY=VALUE...")
+	usage := "usage: oak secrets set <app> KEY=VALUE... | oak secrets list <app> | oak secrets unset <app> KEY..."
+	if len(args) < 2 {
+		return errors.New(usage)
 	}
-	app := args[1]
-	kv, err := cli.ParseKV(args[2:])
+	sub, app := args[0], args[1]
+
+	client, err := cli.NewClient()
 	if err != nil {
 		return err
+	}
+
+	switch sub {
+	case "set":
+		if len(args) < 3 {
+			return errors.New(usage)
+		}
+		kv, err := cli.ParseKV(args[2:])
+		if err != nil {
+			return err
+		}
+		if err := client.SetSecrets(context.Background(), app, kv); err != nil {
+			return err
+		}
+		fmt.Printf("run: oak restart %s to apply\n", app)
+		return nil
+	case "list":
+		if len(args) != 2 {
+			return errors.New(usage)
+		}
+		keys, err := client.SecretKeys(context.Background(), app)
+		if err != nil {
+			return err
+		}
+		for _, k := range keys {
+			fmt.Println(k)
+		}
+		return nil
+	case "unset":
+		if len(args) < 3 {
+			return errors.New(usage)
+		}
+		if err := client.UnsetSecrets(context.Background(), app, args[2:]); err != nil {
+			return err
+		}
+		fmt.Printf("run: oak restart %s to apply\n", app)
+		return nil
+	default:
+		return errors.New(usage)
+	}
+}
+
+// runRestart reboots app from its latest release, with no rebuild.
+func runRestart(args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("usage: oak restart <app>")
+	}
+	client, err := cli.NewClient()
+	if err != nil {
+		return err
+	}
+	return client.Restart(context.Background(), args[0], os.Stdout)
+}
+
+// runScale resizes an app's VM and reboots it from its latest release.
+func runScale(args []string) error {
+	fs := flag.NewFlagSet("scale", flag.ExitOnError)
+	memory := fs.String("memory", "", "memory size, e.g. 1gb, 512mb, or a bare integer for MB")
+	cpus := fs.Int("cpus", 0, "number of vCPUs")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: oak scale <app> [--memory 1gb] [--cpus 2]")
+	}
+	if *memory == "" && *cpus == 0 {
+		return fmt.Errorf("scale requires at least one of --memory or --cpus")
+	}
+
+	memoryMB := 0
+	if *memory != "" {
+		mb, err := cli.ParseMemoryMB(*memory)
+		if err != nil {
+			return err
+		}
+		memoryMB = mb
 	}
 
 	client, err := cli.NewClient()
 	if err != nil {
 		return err
 	}
-	return client.SetSecrets(context.Background(), app, kv)
+	return client.Scale(context.Background(), fs.Arg(0), memoryMB, *cpus, os.Stdout)
+}
+
+// runDestroy tears down an app entirely. Refuses to run without -y.
+func runDestroy(args []string) error {
+	fs := flag.NewFlagSet("destroy", flag.ExitOnError)
+	yes := fs.Bool("y", false, "confirm destruction")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: oak destroy <app> -y")
+	}
+	if !*yes {
+		return fmt.Errorf("destroy requires -y to confirm")
+	}
+
+	client, err := cli.NewClient()
+	if err != nil {
+		return err
+	}
+	return client.Destroy(context.Background(), fs.Arg(0))
 }
 
 func runVolumes(args []string) error {

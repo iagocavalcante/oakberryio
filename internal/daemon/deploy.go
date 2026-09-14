@@ -181,6 +181,44 @@ func (d *Deployer) Deploy(ctx context.Context, cfg *appconfig.Config, image stri
 		return "", fmt.Errorf("insert release: %w", err)
 	}
 
+	rel := store.Release{
+		ID:      releaseID,
+		App:     cfg.App,
+		Image:   image,
+		RootFS:  rootfsPath,
+		Cmd:     string(cmdJSON),
+		Env:     string(envJSON),
+		Workdir: meta.WorkingDir,
+	}
+	return d.bootFromRelease(ctx, cfg, rel, progress)
+}
+
+// bootFromRelease is Deploy's "boot half": it builds a fresh VM spec/guest
+// from cfg (VM size, env, services, volumes) and rel (rootfs, entrypoint,
+// cmd, env, workdir -- decoded the same way reconcileOne decodes a stored
+// release), boots it, health-gates the cutover, and on success stops the
+// app's previous machines and re-renders the tunnel config. Deploy calls
+// this right after inserting a brand new release; Restart and Scale call it
+// with the app's existing latest release to reboot without a rebuild.
+//
+// On any failure the new machine is torn down and its DB row removed, same
+// as Deploy's original inline failure-cleanup paths.
+func (d *Deployer) bootFromRelease(ctx context.Context, cfg *appconfig.Config, rel store.Release, progress func(string)) (string, error) {
+	emit := func(msg string) {
+		if progress != nil {
+			progress(msg)
+		}
+	}
+
+	rc, err := decodeReleaseCmd(rel.Cmd)
+	if err != nil {
+		return "", err
+	}
+	imageEnv, err := decodeReleaseEnv(rel.Env)
+	if err != nil {
+		return "", err
+	}
+
 	volSpecs, mounts, err := d.resolveVolumes(cfg)
 	if err != nil {
 		return "", fmt.Errorf("resolve volumes: %w", err)
@@ -192,7 +230,7 @@ func (d *Deployer) Deploy(ctx context.Context, cfg *appconfig.Config, image stri
 	}
 	tap := "oak-" + id[:8]
 
-	ip, err := d.Store.AllocAndInsertMachine(id, cfg.App, releaseID, tap)
+	ip, err := d.Store.AllocAndInsertMachine(id, cfg.App, rel.ID, tap)
 	if err != nil {
 		return "", fmt.Errorf("alloc ip and insert machine %s: %w", id, err)
 	}
@@ -201,7 +239,7 @@ func (d *Deployer) Deploy(ctx context.Context, cfg *appconfig.Config, image stri
 		return "", fmt.Errorf("mac from ip %s: %w", ip, err)
 	}
 
-	envMap, err := d.buildGuestEnv(cfg, meta.Env)
+	envMap, err := d.buildGuestEnv(cfg, imageEnv)
 	if err != nil {
 		return "", fmt.Errorf("build guest env: %w", err)
 	}
@@ -219,15 +257,15 @@ func (d *Deployer) Deploy(ctx context.Context, cfg *appconfig.Config, image stri
 		Gateway:    "10.200.0.1",
 		DNS:        "10.200.0.1",
 		Env:        envMap,
-		Entrypoint: meta.Entrypoint,
-		Cmd:        meta.Cmd,
-		WorkingDir: meta.WorkingDir,
+		Entrypoint: rc.Entrypoint,
+		Cmd:        rc.Cmd,
+		WorkingDir: rel.Workdir,
 		Mounts:     mounts,
 	}
 	spec := vm.Spec{
 		ID:        id,
 		Kernel:    d.kernel(),
-		RootFS:    rootfsPath,
+		RootFS:    rel.RootFS,
 		Volumes:   volSpecs,
 		Tap:       tap,
 		MAC:       mac,
@@ -293,6 +331,141 @@ func (d *Deployer) Deploy(ctx context.Context, cfg *appconfig.Config, image stri
 	}
 
 	return id, nil
+}
+
+// Restart reboots app from its latest release with no rebuild: it loads the
+// app's stored config and boots a fresh machine from the newest release row
+// via bootFromRelease, which health-gates the cutover exactly like Deploy.
+// Errors if the app has no release yet.
+func (d *Deployer) Restart(ctx context.Context, app string, progress func(string)) (string, error) {
+	cfg, err := d.appConfig(app)
+	if err != nil {
+		return "", err
+	}
+	rel, err := d.Store.LatestRelease(app)
+	if err != nil {
+		return "", fmt.Errorf("restart %s: %w", app, err)
+	}
+	return d.bootFromRelease(ctx, cfg, rel, progress)
+}
+
+// Scale updates app's VM size (memory and/or CPU count) and reboots it from
+// its latest release so the new machine picks up the change. A zero
+// memoryMB or cpus leaves that field unchanged; callers (handleScale, the
+// CLI) are responsible for rejecting a request where both are zero.
+func (d *Deployer) Scale(ctx context.Context, app string, memoryMB, cpus int, progress func(string)) (string, error) {
+	cfg, err := d.appConfig(app)
+	if err != nil {
+		return "", err
+	}
+	// Copy rather than mutate the (possibly cached) *appconfig.Config
+	// appConfig returned: if UpsertApp below fails, the in-memory cache must
+	// not have already been updated to a size that was never persisted.
+	scaled := *cfg
+	if memoryMB != 0 {
+		scaled.VM.MemoryMB = memoryMB
+	}
+	if cpus != 0 {
+		scaled.VM.CPUs = cpus
+	}
+
+	configJSON, err := json.Marshal(&scaled)
+	if err != nil {
+		return "", fmt.Errorf("marshal config for %s: %w", app, err)
+	}
+	if err := d.Store.UpsertApp(app, string(configJSON)); err != nil {
+		return "", fmt.Errorf("upsert app %s: %w", app, err)
+	}
+	d.cacheConfig(app, &scaled)
+
+	rel, err := d.Store.LatestRelease(app)
+	if err != nil {
+		return "", fmt.Errorf("scale %s: %w", app, err)
+	}
+	return d.bootFromRelease(ctx, &scaled, rel, progress)
+}
+
+// Destroy stops every machine for app, deletes all of its rows (machines,
+// then releases/secrets/volumes, then the app itself), removes its on-disk
+// artifacts, and re-renders the tunnel config so its route disappears.
+// Machines are stopped and deleted first because both releases and machines
+// carry a foreign key on apps.name; deleting the app row before that would
+// fail (or, if it somehow succeeded, orphan those rows).
+func (d *Deployer) Destroy(ctx context.Context, app string) error {
+	machines, err := d.Store.MachinesForApp(app)
+	if err != nil {
+		return fmt.Errorf("list machines for %s: %w", app, err)
+	}
+	for _, m := range machines {
+		if handle := d.getHandle(m.ID); handle != nil {
+			_ = handle.Stop(ctx) // best-effort: still remove the DB row below either way
+		}
+		// ponytail: as in stopOldMachines, a machine with no live handle
+		// (daemon restarted since it started, or a crash) leaves any
+		// underlying Firecracker process as an orphan; out of scope for v1
+		// per the design doc. The row is still deleted so the app delete
+		// below never trips the machines->apps foreign key.
+		if err := d.Store.DeleteMachine(m.ID); err != nil {
+			return fmt.Errorf("delete machine %s: %w", m.ID, err)
+		}
+		// Deleting the row before removing the handle (same order as
+		// stopOldMachines) means a concurrent watchMachine, once handle.Wait
+		// returns, finds the row already gone via Store.Machine and no-ops
+		// instead of racing this delete.
+		d.removeHandle(m.ID)
+	}
+
+	if err := d.Store.DeleteReleasesForApp(app); err != nil {
+		return err
+	}
+	if err := d.Store.DeleteSecretsForApp(app); err != nil {
+		return err
+	}
+	if err := d.Store.DeleteVolumesForApp(app); err != nil {
+		return err
+	}
+	if err := d.Store.DeleteApp(app); err != nil {
+		return err
+	}
+
+	d.mu.Lock()
+	delete(d.appConfigs, app)
+	d.mu.Unlock()
+
+	// Remove on-disk artifacts. Registry blobs (<registry>/<app>:*) are left
+	// in place.
+	// ponytail: no registry GC here; add a sweep of the registry's blob
+	// store keyed by app name if disk usage from destroyed apps' images
+	// becomes a problem.
+	if err := os.RemoveAll(filepath.Join(d.DataDir, "images", app)); err != nil {
+		return fmt.Errorf("remove images for %s: %w", app, err)
+	}
+	if err := os.RemoveAll(filepath.Join(d.LogDir, app)); err != nil {
+		return fmt.Errorf("remove logs for %s: %w", app, err)
+	}
+	volumeImgs, err := filepath.Glob(filepath.Join(d.DataDir, "volumes", app+"-*.img"))
+	if err != nil {
+		return fmt.Errorf("glob volumes for %s: %w", app, err)
+	}
+	for _, p := range volumeImgs {
+		if err := os.Remove(p); err != nil {
+			return fmt.Errorf("remove volume file %s: %w", p, err)
+		}
+	}
+
+	// Same ErrRestart carve-out as Deploy: the app and its rows/files are
+	// already fully gone at this point, so a cloudflared reload hiccup (the
+	// new config, minus this app's route, is already on disk) shouldn't be
+	// reported as a failed destroy. Destroy has no progress channel to warn
+	// on, so just log, matching watchMachine's own best-effort re-apply.
+	if err := d.applyTunnel(ctx); err != nil {
+		if errors.Is(err, tunnel.ErrRestart) {
+			log.Printf("oakd: tunnel restart failed after destroying %s: %v", app, err)
+			return nil
+		}
+		return fmt.Errorf("apply tunnel config: %w", err)
+	}
+	return nil
 }
 
 // watchMachine blocks until handle's underlying process exits, then -- only

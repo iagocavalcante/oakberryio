@@ -3,6 +3,9 @@ package daemon
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -455,5 +458,202 @@ func TestWatchMachineNoopsWhenRowDeletedBeforeExit(t *testing.T) {
 	}
 	if _, err := d.Store.Machine(id); err == nil {
 		t.Fatal("want machine to stay deleted")
+	}
+}
+
+// --- Restart: reboot from latest release, no rebuild -----------------------
+
+func TestRestartBootsFreshMachineFromLatestReleaseAndSupersedesOld(t *testing.T) {
+	rt := &fakeRuntime{}
+	d := testDeployer(t, rt, &fakeChecker{healthy: true})
+	cfg := baseConfig("hello")
+
+	id1, err := d.Deploy(context.Background(), cfg, "img:1", nil)
+	if err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+
+	id2, err := d.Restart(context.Background(), "hello", nil)
+	if err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	if id2 == id1 {
+		t.Fatal("restart should boot a new machine id")
+	}
+
+	machines, err := d.Store.MachinesForApp("hello")
+	if err != nil {
+		t.Fatalf("machines for app: %v", err)
+	}
+	if len(machines) != 1 || machines[0].ID != id2 || machines[0].State != "running" {
+		t.Fatalf("want exactly the new machine running, got %+v", machines)
+	}
+
+	// Restart must not rebuild: exactly one BuildRootfs call (the original
+	// deploy), and the rebooted machine reuses the same rootfs.
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if len(rt.starts) != 2 {
+		t.Fatalf("want 2 Start calls (deploy + restart), got %d", len(rt.starts))
+	}
+	if rt.starts[1].RootFS != rt.starts[0].RootFS {
+		t.Fatalf("restart used a different rootfs: %s vs %s", rt.starts[1].RootFS, rt.starts[0].RootFS)
+	}
+}
+
+func TestRestartErrorsWhenAppHasNoRelease(t *testing.T) {
+	d := testDeployer(t, &fakeRuntime{}, &fakeChecker{healthy: true})
+	if err := d.Store.UpsertApp("hello", "{}"); err != nil {
+		t.Fatalf("upsert app: %v", err)
+	}
+	if _, err := d.Restart(context.Background(), "hello", nil); err == nil {
+		t.Fatal("want error restarting an app with no release")
+	}
+}
+
+// --- Scale: resize VM and reboot from latest release ------------------------
+
+func TestScaleUpdatesVMSizeBootsFreshMachineAndSupersedesOld(t *testing.T) {
+	rt := &fakeRuntime{}
+	d := testDeployer(t, rt, &fakeChecker{healthy: true})
+	cfg := baseConfig("hello")
+
+	id1, err := d.Deploy(context.Background(), cfg, "img:1", nil)
+	if err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+
+	id2, err := d.Scale(context.Background(), "hello", 512, 2, nil)
+	if err != nil {
+		t.Fatalf("scale: %v", err)
+	}
+	if id2 == id1 {
+		t.Fatal("scale should boot a new machine id")
+	}
+
+	machines, err := d.Store.MachinesForApp("hello")
+	if err != nil {
+		t.Fatalf("machines for app: %v", err)
+	}
+	if len(machines) != 1 || machines[0].ID != id2 || machines[0].State != "running" {
+		t.Fatalf("want exactly the new machine running, got %+v", machines)
+	}
+
+	rt.mu.Lock()
+	last := rt.starts[len(rt.starts)-1]
+	rt.mu.Unlock()
+	if last.MemoryMB != 512 || last.CPUs != 2 {
+		t.Fatalf("scaled spec = %+v, want memory 512 cpus 2", last)
+	}
+
+	// The scaled size is persisted, so a later restart keeps it.
+	raw, err := d.Store.AppConfig("hello")
+	if err != nil {
+		t.Fatalf("app config: %v", err)
+	}
+	if !strings.Contains(raw, `"MemoryMB":512`) || !strings.Contains(raw, `"CPUs":2`) {
+		t.Fatalf("stored config missing scaled VM size: %s", raw)
+	}
+}
+
+func TestScaleLeavesZeroFieldsUnchanged(t *testing.T) {
+	d := testDeployer(t, &fakeRuntime{}, &fakeChecker{healthy: true})
+	cfg := baseConfig("hello")
+	cfg.VM = appconfig.VM{MemoryMB: 256, CPUs: 4}
+
+	if _, err := d.Deploy(context.Background(), cfg, "img:1", nil); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+	if _, err := d.Scale(context.Background(), "hello", 1024, 0, nil); err != nil {
+		t.Fatalf("scale: %v", err)
+	}
+
+	raw, err := d.Store.AppConfig("hello")
+	if err != nil {
+		t.Fatalf("app config: %v", err)
+	}
+	if !strings.Contains(raw, `"MemoryMB":1024`) || !strings.Contains(raw, `"CPUs":4`) {
+		t.Fatalf("scale with cpus=0 should leave CPUs unchanged: %s", raw)
+	}
+}
+
+// --- Destroy: full teardown --------------------------------------------------
+
+func TestDestroyRemovesRowsFilesAndDropsTunnelRoute(t *testing.T) {
+	d := testDeployer(t, &fakeRuntime{}, &fakeChecker{healthy: true})
+	tunnelConfig := filepath.Join(t.TempDir(), "config.yml")
+	d.Domain = "example.com"
+	d.TunnelID = "tid"
+	d.TunnelConfig = tunnelConfig
+
+	cfg := baseConfig("hello")
+	cfg.Services = []appconfig.Service{{InternalPort: 8080}}
+	if _, err := d.Deploy(context.Background(), cfg, "img:1", nil); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+
+	before, err := os.ReadFile(tunnelConfig)
+	if err != nil {
+		t.Fatalf("read tunnel config after deploy: %v", err)
+	}
+	if !strings.Contains(string(before), "hello.example.com") {
+		t.Fatalf("tunnel config missing hello's route before destroy: %s", before)
+	}
+
+	if err := d.Destroy(context.Background(), "hello"); err != nil {
+		t.Fatalf("destroy: %v", err)
+	}
+
+	after, err := os.ReadFile(tunnelConfig)
+	if err != nil {
+		t.Fatalf("read tunnel config after destroy: %v", err)
+	}
+	if strings.Contains(string(after), "hello.example.com") {
+		t.Fatalf("tunnel config still has hello's route after destroy: %s", after)
+	}
+
+	if machines, err := d.Store.MachinesForApp("hello"); err != nil || len(machines) != 0 {
+		t.Fatalf("machines after destroy = %+v, err %v, want none", machines, err)
+	}
+	if _, err := d.Store.LatestRelease("hello"); err == nil {
+		t.Fatal("want releases gone after destroy")
+	}
+	if _, err := d.Store.AppConfig("hello"); err == nil {
+		t.Fatal("want app row gone after destroy")
+	}
+
+	if _, err := os.Stat(filepath.Join(d.DataDir, "images", "hello")); !os.IsNotExist(err) {
+		t.Fatalf("images dir for hello should be gone, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(d.LogDir, "hello")); !os.IsNotExist(err) {
+		t.Fatalf("log dir for hello should be gone, stat err = %v", err)
+	}
+}
+
+func TestDestroyLeavesOtherAppsUntouched(t *testing.T) {
+	d := testDeployer(t, &fakeRuntime{}, &fakeChecker{healthy: true})
+
+	if _, err := d.Deploy(context.Background(), baseConfig("hello"), "img:1", nil); err != nil {
+		t.Fatalf("deploy hello: %v", err)
+	}
+	survivorID, err := d.Deploy(context.Background(), baseConfig("other"), "img:1", nil)
+	if err != nil {
+		t.Fatalf("deploy other: %v", err)
+	}
+
+	if err := d.Destroy(context.Background(), "hello"); err != nil {
+		t.Fatalf("destroy: %v", err)
+	}
+
+	apps, err := d.Store.Apps()
+	if err != nil {
+		t.Fatalf("apps: %v", err)
+	}
+	if len(apps) != 1 || apps[0] != "other" {
+		t.Fatalf("apps = %v, want just [other]", apps)
+	}
+	machines, err := d.Store.MachinesForApp("other")
+	if err != nil || len(machines) != 1 || machines[0].ID != survivorID {
+		t.Fatalf("other's machine = %+v, err %v, want just %s", machines, err, survivorID)
 	}
 }

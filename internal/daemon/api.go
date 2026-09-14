@@ -30,9 +30,14 @@ type API struct {
 func (a *API) Mux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /apps/{name}/deploy", a.handleDeploy)
+	mux.HandleFunc("POST /apps/{name}/restart", a.handleRestart)
+	mux.HandleFunc("POST /apps/{name}/scale", a.handleScale)
+	mux.HandleFunc("DELETE /apps/{name}", a.handleDestroy)
 	mux.HandleFunc("GET /apps/{name}/machines", a.handleMachines)
 	mux.HandleFunc("GET /apps/{name}/logs", a.handleLogs)
 	mux.HandleFunc("PUT /apps/{name}/secrets", a.handleSecrets)
+	mux.HandleFunc("GET /apps/{name}/secrets", a.handleListSecrets)
+	mux.HandleFunc("DELETE /apps/{name}/secrets", a.handleUnsetSecrets)
 	mux.HandleFunc("POST /apps/{name}/volumes", a.handleCreateVolume)
 	mux.HandleFunc("GET /apps", a.handleApps)
 	return mux
@@ -127,6 +132,91 @@ func (a *API) resolveConfig(name, tomlText string) (*appconfig.Config, error) {
 		return nil, fmt.Errorf("decode stored config for %q: %w", name, err)
 	}
 	return &cfg, nil
+}
+
+// handleRestart reboots app from its latest stored release, with no
+// rebuild. Streams progress exactly like handleDeploy; see that handler's
+// doc comment for the wire contract (always 200, final line is "ok
+// <machine-id>" or "error: <message>").
+func (a *API) handleRestart(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if !appconfig.ValidName(name) {
+		http.Error(w, fmt.Sprintf("invalid app name %q", name), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	progress := func(msg string) {
+		fmt.Fprint(w, msg)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+
+	id, err := a.Deployer.Restart(r.Context(), name, progress)
+	if err != nil {
+		progress(fmt.Sprintf("error: %v\n", err))
+		return
+	}
+	progress(fmt.Sprintf("ok %s\n", id))
+}
+
+// handleScale resizes app's VM (memory and/or CPU count) and reboots it
+// from its latest release, streaming progress the same way handleDeploy and
+// handleRestart do. Rejects a request that leaves both fields zero -- that
+// would be a no-op resize that still reboots the app for nothing.
+func (a *API) handleScale(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if !appconfig.ValidName(name) {
+		http.Error(w, fmt.Sprintf("invalid app name %q", name), http.StatusBadRequest)
+		return
+	}
+	var body struct {
+		MemoryMB int `json:"memory_mb"`
+		CPUs     int `json:"cpus"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, fmt.Sprintf("decode body: %v", err), http.StatusBadRequest)
+		return
+	}
+	if body.MemoryMB == 0 && body.CPUs == 0 {
+		http.Error(w, "at least one of memory_mb or cpus is required", http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	progress := func(msg string) {
+		fmt.Fprint(w, msg)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+
+	id, err := a.Deployer.Scale(r.Context(), name, body.MemoryMB, body.CPUs, progress)
+	if err != nil {
+		progress(fmt.Sprintf("error: %v\n", err))
+		return
+	}
+	progress(fmt.Sprintf("ok %s\n", id))
+}
+
+// handleDestroy tears down app entirely: every machine, all its rows, its
+// on-disk artifacts, and its tunnel route.
+func (a *API) handleDestroy(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if !appconfig.ValidName(name) {
+		http.Error(w, fmt.Sprintf("invalid app name %q", name), http.StatusBadRequest)
+		return
+	}
+	if err := a.Deployer.Destroy(r.Context(), name); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *API) handleMachines(w http.ResponseWriter, r *http.Request) {
@@ -227,6 +317,52 @@ func (a *API) handleSecrets(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := a.Store.PutSecret(name, key, ct); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleListSecrets returns the sorted key names of app's secrets, never
+// their ciphertext or plaintext values.
+func (a *API) handleListSecrets(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if !appconfig.ValidName(name) {
+		http.Error(w, fmt.Sprintf("invalid app name %q", name), http.StatusBadRequest)
+		return
+	}
+	encrypted, err := a.Store.Secrets(name)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	keys := make([]string, 0, len(encrypted))
+	for k := range encrypted {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(keys)
+}
+
+// handleUnsetSecrets deletes the named secret keys for app. Missing keys are
+// silently ignored, matching DeleteSecret's own semantics.
+func (a *API) handleUnsetSecrets(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if !appconfig.ValidName(name) {
+		http.Error(w, fmt.Sprintf("invalid app name %q", name), http.StatusBadRequest)
+		return
+	}
+	var body struct {
+		Keys []string `json:"keys"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	for _, key := range body.Keys {
+		if err := a.Store.DeleteSecret(name, key); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

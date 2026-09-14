@@ -404,6 +404,65 @@ func (s *Store) ReleaseByID(id int64) (Release, error) {
 	return r, nil
 }
 
+// LatestRelease returns the most recently created release for app.
+func (s *Store) LatestRelease(app string) (Release, error) {
+	var r Release
+	err := s.db.QueryRow(
+		`SELECT id, app, image, rootfs, node_id, cmd, env, workdir, created_at
+		 FROM releases WHERE app = ? ORDER BY id DESC LIMIT 1`,
+		app,
+	).Scan(&r.ID, &r.App, &r.Image, &r.RootFS, &r.NodeID, &r.Cmd, &r.Env, &r.Workdir, &r.CreatedAt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return Release{}, fmt.Errorf("latest release for %s: not found", app)
+		}
+		return Release{}, fmt.Errorf("latest release for %s: %w", app, err)
+	}
+	return r, nil
+}
+
+// DeleteApp removes app's row. Callers must delete its releases first (the
+// releases table has a foreign key on apps.name).
+func (s *Store) DeleteApp(name string) error {
+	if _, err := s.db.Exec(`DELETE FROM apps WHERE name = ?`, name); err != nil {
+		return fmt.Errorf("delete app %s: %w", name, err)
+	}
+	return nil
+}
+
+// DeleteReleasesForApp removes every release row for app.
+func (s *Store) DeleteReleasesForApp(app string) error {
+	if _, err := s.db.Exec(`DELETE FROM releases WHERE app = ?`, app); err != nil {
+		return fmt.Errorf("delete releases for %s: %w", app, err)
+	}
+	return nil
+}
+
+// DeleteSecretsForApp removes every secret for app.
+func (s *Store) DeleteSecretsForApp(app string) error {
+	if _, err := s.db.Exec(`DELETE FROM secrets WHERE app = ?`, app); err != nil {
+		return fmt.Errorf("delete secrets for %s: %w", app, err)
+	}
+	return nil
+}
+
+// DeleteVolumesForApp removes every volume row for app. The backing .img
+// file is removed separately by the caller (Deployer.Destroy).
+func (s *Store) DeleteVolumesForApp(app string) error {
+	if _, err := s.db.Exec(`DELETE FROM volumes WHERE app = ?`, app); err != nil {
+		return fmt.Errorf("delete volumes for %s: %w", app, err)
+	}
+	return nil
+}
+
+// DeleteSecret removes a single secret, e.g. for `oak secrets unset`.
+func (s *Store) DeleteSecret(app, key string) error {
+	if _, err := s.db.Exec(`DELETE FROM secrets WHERE app = ? AND key = ?`, app, key); err != nil {
+		return fmt.Errorf("delete secret %s/%s: %w", app, key, err)
+	}
+	return nil
+}
+
 // Volume is a row from the volumes table.
 type Volume struct {
 	Name   string
