@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"filippo.io/age"
@@ -104,6 +105,13 @@ type Deployer struct {
 	// check without actually waiting a minute.
 	HealthTimeout  time.Duration
 	HealthInterval time.Duration
+
+	// shuttingDown is set by StopAll when the daemon is being stopped. While
+	// set, watchMachine leaves each machine's row 'running' instead of
+	// deleting it on the exit StopAll triggers, so a graceful `systemctl
+	// restart oakd` recovers exactly like a crash does: Reconcile restarts
+	// every 'running' row on the next start.
+	shuttingDown atomic.Bool
 
 	mu         sync.Mutex
 	handles    map[string]Handle
@@ -296,6 +304,14 @@ func (d *Deployer) Deploy(ctx context.Context, cfg *appconfig.Config, image stri
 // daemon process, hence BaseCtx rather than any per-call ctx.
 func (d *Deployer) watchMachine(id string, handle Handle) {
 	waitErr := handle.Wait(context.WithoutCancel(d.baseCtx()))
+
+	// If the daemon is shutting down, this exit was triggered by StopAll.
+	// Leave the row 'running' (and the tunnel untouched) so Reconcile brings
+	// the machine back on the next start; deleting it here is what made a
+	// graceful `systemctl restart oakd` lose every machine.
+	if d.shuttingDown.Load() {
+		return
+	}
 
 	m, err := d.Store.Machine(id)
 	if err != nil {
@@ -583,6 +599,11 @@ func (d *Deployer) removeHandle(id string) {
 // live handle for, returning any per-machine stop errors keyed by machine
 // ID. Used on daemon shutdown.
 func (d *Deployer) StopAll(ctx context.Context) map[string]error {
+	// Mark shutdown before stopping anything so every watchMachine goroutine
+	// sees it when the Stop below makes its handle.Wait return, and leaves the
+	// row 'running' for Reconcile instead of deleting it.
+	d.shuttingDown.Store(true)
+
 	d.mu.Lock()
 	handles := make(map[string]Handle, len(d.handles))
 	for id, h := range d.handles {
