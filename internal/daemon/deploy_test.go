@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -627,6 +628,55 @@ func TestDestroyRemovesRowsFilesAndDropsTunnelRoute(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(d.LogDir, "hello")); !os.IsNotExist(err) {
 		t.Fatalf("log dir for hello should be gone, stat err = %v", err)
+	}
+}
+
+func TestApplyTunnelRoutesCustomDomainsToSameService(t *testing.T) {
+	d := testDeployer(t, &fakeRuntime{}, &fakeChecker{healthy: true})
+	tunnelConfig := filepath.Join(t.TempDir(), "config.yml")
+	d.Domain = "example.com"
+	d.TunnelID = "tid"
+	d.TunnelConfig = tunnelConfig
+
+	cfg := baseConfig("hello")
+	cfg.Services = []appconfig.Service{{InternalPort: 8080}}
+	cfg.Domains = []string{"misesnag.app", "www.misesnag.app"}
+	if _, err := d.Deploy(context.Background(), cfg, "img:1", nil); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+
+	raw, err := os.ReadFile(tunnelConfig)
+	if err != nil {
+		t.Fatalf("read tunnel config: %v", err)
+	}
+
+	machines, err := d.Store.RunningMachines()
+	if err != nil {
+		t.Fatalf("running machines: %v", err)
+	}
+	if len(machines) != 1 {
+		t.Fatalf("machines = %+v, want exactly one", machines)
+	}
+	wantService := fmt.Sprintf("service: http://%s:8080", machines[0].IP)
+
+	config := string(raw)
+	for _, hostname := range []string{"hello.example.com", "misesnag.app", "www.misesnag.app"} {
+		if !strings.Contains(config, "hostname: "+hostname) {
+			t.Fatalf("tunnel config missing route for %s: %s", hostname, config)
+		}
+	}
+	if n := strings.Count(config, wantService); n != 3 {
+		t.Fatalf("want 3 routes pointing at %s (default + 2 custom domains), got %d: %s", wantService, n, config)
+	}
+
+	// Default hostname first, then custom domains in declared order, before
+	// the oak.<domain> catch-all.
+	defaultIdx := strings.Index(config, "hostname: hello.example.com")
+	firstIdx := strings.Index(config, "hostname: misesnag.app")
+	secondIdx := strings.Index(config, "hostname: www.misesnag.app")
+	oakIdx := strings.Index(config, "hostname: oak.example.com")
+	if !(defaultIdx < firstIdx && firstIdx < secondIdx && secondIdx < oakIdx) {
+		t.Fatalf("route order wrong: default=%d misesnag=%d www=%d oak=%d\n%s", defaultIdx, firstIdx, secondIdx, oakIdx, config)
 	}
 }
 

@@ -721,10 +721,17 @@ func (d *Deployer) applyTunnel(ctx context.Context) error {
 		if len(cfg.Services) == 0 {
 			continue // nothing to route to without a declared service port
 		}
+		service := fmt.Sprintf("http://%s:%d", m.IP, cfg.Services[0].InternalPort)
 		routes = append(routes, tunnel.Route{
 			Hostname: fmt.Sprintf("%s.%s", m.App, d.Domain),
-			Service:  fmt.Sprintf("http://%s:%d", m.IP, cfg.Services[0].InternalPort),
+			Service:  service,
 		})
+		for _, domain := range cfg.Domains {
+			routes = append(routes, tunnel.Route{
+				Hostname: domain,
+				Service:  service,
+			})
+		}
 	}
 	routes = append(routes, tunnel.Route{
 		Hostname: fmt.Sprintf("oak.%s", d.Domain),

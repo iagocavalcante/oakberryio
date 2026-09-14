@@ -6,6 +6,8 @@ const sample = `
 app = "hello"
 [build]
 dockerfile = "Dockerfile"
+[build.args]
+NEXT_PUBLIC_API_URL = "https://api.example.com"
 [env]
 PORT = "8080"
 [[services]]
@@ -40,6 +42,9 @@ func TestParse(t *testing.T) {
 	if c.VM.MemoryMB != 256 {
 		t.Fatal("mem")
 	}
+	if c.Build.Args["NEXT_PUBLIC_API_URL"] != "https://api.example.com" {
+		t.Fatalf("build args = %+v", c.Build.Args)
+	}
 }
 
 func TestDefaults(t *testing.T) {
@@ -54,6 +59,28 @@ func TestDefaults(t *testing.T) {
 
 func TestRejectsBadName(t *testing.T) {
 	if _, err := Parse([]byte(`app = "Bad Name"`)); err == nil {
+		t.Fatal("want error")
+	}
+}
+
+func TestParsesCustomDomains(t *testing.T) {
+	c, err := Parse([]byte(`
+app = "hello"
+domains = ["misesnag.app", "www.misesnag.app"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Domains) != 2 || c.Domains[0] != "misesnag.app" || c.Domains[1] != "www.misesnag.app" {
+		t.Fatalf("domains = %v", c.Domains)
+	}
+}
+
+func TestRejectsBadDomain(t *testing.T) {
+	if _, err := Parse([]byte(`
+app = "hello"
+domains = ["not a domain"]
+`)); err == nil {
 		t.Fatal("want error")
 	}
 }

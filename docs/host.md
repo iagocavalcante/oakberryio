@@ -102,3 +102,39 @@ ssh -L 5000:localhost:5000 <box>
 
 Leave that session open (or run it with `-fN` to background it) for the
 duration of the `docker push`.
+
+## Build-time arguments
+
+`oak.toml`'s `[build.args]` table is passed to `docker build` as
+`--build-arg` flags (one per entry, sorted by key for a stable command), for
+Dockerfiles that bake values in at build time via `ARG`:
+
+```toml
+[build.args]
+NEXT_PUBLIC_API_URL = "https://api.apps.example.com"
+```
+
+This is separate from `[env]`, which sets runtime environment variables in
+the running machine; `[build.args]` values only exist during `docker build`
+and must be re-declared as `ARG` in the Dockerfile to be baked into the
+image.
+
+## Custom domains
+
+An app's default hostname is `<app>.<OAK_DOMAIN>`. To also serve it under
+one or more of your own domains, list them in `oak.toml`:
+
+```toml
+domains = ["misesnag.app", "www.misesnag.app"]
+```
+
+Each entry is routed to the same service as the default hostname -- it does
+not need to be a subdomain of `OAK_DOMAIN`. For each custom domain you still
+have to, in that domain's own DNS/Cloudflare zone:
+
+1. Add a `CNAME` (or `A`/`AAAA` via Cloudflare proxy) record pointing at
+   `<tunnel-id>.cfargotunnel.com`, same as the wildcard record in step 4
+   above.
+2. Make sure that zone has TLS coverage for the hostname (e.g. a Cloudflare
+   Universal SSL certificate, or your own) -- `oakd` only adds the ingress
+   rule, it doesn't provision certificates outside `OAK_DOMAIN`'s zone.

@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"text/tabwriter"
 	"time"
@@ -105,7 +106,19 @@ func runDeploy(args []string) error {
 	}
 	image := fmt.Sprintf("%s/%s:%d", registry, cfg.App, time.Now().Unix())
 
-	if err := runStreamed("docker", "build", "-t", image, "-f", cfg.Build.Dockerfile, "."); err != nil {
+	buildArgs := make([]string, 0, len(cfg.Build.Args))
+	for k := range cfg.Build.Args {
+		buildArgs = append(buildArgs, k)
+	}
+	sort.Strings(buildArgs)
+
+	dockerArgs := []string{"build", "-t", image, "-f", cfg.Build.Dockerfile}
+	for _, k := range buildArgs {
+		dockerArgs = append(dockerArgs, "--build-arg", fmt.Sprintf("%s=%s", k, cfg.Build.Args[k]))
+	}
+	dockerArgs = append(dockerArgs, ".")
+
+	if err := runStreamed("docker", dockerArgs...); err != nil {
 		return fmt.Errorf("docker build: %w", err)
 	}
 	if err := runStreamed("docker", "push", image); err != nil {
