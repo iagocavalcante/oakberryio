@@ -112,7 +112,12 @@ func runDeploy(args []string) error {
 	}
 	sort.Strings(buildArgs)
 
-	dockerArgs := []string{"build", "-t", image, "-f", cfg.Build.Dockerfile}
+	// Always build for linux/amd64: oakd, oak-init and the Firecracker guest
+	// kernel are all amd64, so an image built for the host's native arch (e.g.
+	// arm64 on an Apple Silicon Mac) boots to "exec format error" inside the
+	// guest. Pinning the platform makes a deploy from any dev machine produce
+	// a runnable image (via the local Docker's emulation when needed).
+	dockerArgs := []string{"build", "--platform", "linux/amd64", "-t", image, "-f", cfg.Build.Dockerfile}
 	for _, k := range buildArgs {
 		dockerArgs = append(dockerArgs, "--build-arg", fmt.Sprintf("%s=%s", k, cfg.Build.Args[k]))
 	}
