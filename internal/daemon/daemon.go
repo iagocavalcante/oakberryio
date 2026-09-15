@@ -53,6 +53,9 @@ func (c *Config) applyDefaults() {
 	if c.Socket == "" {
 		c.Socket = "/run/oak.sock"
 	}
+	if c.Registry == "" {
+		c.Registry = "localhost:5000"
+	}
 }
 
 // Daemon wires together the store, deploy orchestrator, DNS resolver and
@@ -99,6 +102,7 @@ func New(ctx context.Context, cfg Config) (*Daemon, error) {
 		DataDir:      cfg.DataDir,
 		LogDir:       cfg.LogDir,
 		Identity:     identity,
+		Registry:     cfg.Registry,
 		BaseCtx:      ctx,
 		Domain:       cfg.Domain,
 		TunnelID:     cfg.TunnelID,

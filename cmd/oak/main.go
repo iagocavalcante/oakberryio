@@ -66,7 +66,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `usage: oak <command> [args]
 
 commands:
-  deploy [-c oak.toml]
+  deploy [-c oak.toml] [--remote]
   apps
   status <app>
   logs <app> [-f]
@@ -83,10 +83,14 @@ commands:
 // runDeploy builds the app's image with docker, pushes it to OAK_REGISTRY
 // (default localhost:5000), then POSTs it to oakd along with the oak.toml
 // text -- always, not just on first deploy, per handleDeploy's contract
-// (internal/daemon/api.go).
+// (internal/daemon/api.go). With --remote, the build and push happen on the
+// box instead (see docs/plans/2026-09-15-remote-build-design.md): the
+// context is tarred and streamed to oakd's POST /apps/{name}/build, and the
+// image ref it returns is deployed exactly the same way as a local build's.
 func runDeploy(args []string) error {
 	fs := flag.NewFlagSet("deploy", flag.ExitOnError)
 	configPath := fs.String("c", "oak.toml", "path to oak.toml")
+	remote := fs.Bool("remote", false, "build the image on the box instead of locally (see docs/plans/2026-09-15-remote-build-design.md)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -98,6 +102,23 @@ func runDeploy(args []string) error {
 	cfg, err := appconfig.Parse(raw)
 	if err != nil {
 		return err
+	}
+
+	client, err := cli.NewClient()
+	if err != nil {
+		return err
+	}
+
+	if *remote {
+		contextTar, err := tarContext(".")
+		if err != nil {
+			return fmt.Errorf("tar build context: %w", err)
+		}
+		image, err := client.BuildRemote(context.Background(), cfg.App, cfg.Build.Dockerfile, cfg.Build.Args, contextTar, os.Stdout)
+		if err != nil {
+			return err
+		}
+		return client.Deploy(context.Background(), cfg.App, image, string(raw), os.Stdout)
 	}
 
 	registry := os.Getenv("OAK_REGISTRY")
@@ -130,10 +151,6 @@ func runDeploy(args []string) error {
 		return fmt.Errorf("docker push: %w", err)
 	}
 
-	client, err := cli.NewClient()
-	if err != nil {
-		return err
-	}
 	return client.Deploy(context.Background(), cfg.App, image, string(raw), os.Stdout)
 }
 

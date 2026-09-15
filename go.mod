@@ -9,6 +9,7 @@ require (
 	github.com/firecracker-microvm/firecracker-go-sdk v1.0.0
 	github.com/google/go-containerregistry v0.22.1
 	github.com/miekg/dns v1.1.73
+	github.com/moby/patternmatcher v0.6.1
 	github.com/vishvananda/netlink v1.3.1
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.45.0

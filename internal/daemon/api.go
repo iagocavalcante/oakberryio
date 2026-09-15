@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -30,6 +31,7 @@ type API struct {
 func (a *API) Mux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /apps/{name}/deploy", a.handleDeploy)
+	mux.HandleFunc("POST /apps/{name}/build", a.handleBuild)
 	mux.HandleFunc("POST /apps/{name}/restart", a.handleRestart)
 	mux.HandleFunc("POST /apps/{name}/scale", a.handleScale)
 	mux.HandleFunc("DELETE /apps/{name}", a.handleDestroy)
@@ -133,6 +135,88 @@ func (a *API) resolveConfig(name, tomlText string) (*appconfig.Config, error) {
 		return nil, fmt.Errorf("decode stored config for %q: %w", name, err)
 	}
 	return &cfg, nil
+}
+
+// handleBuild builds and pushes app's image on the box -- the `oak deploy
+// --remote` path, see docs/plans/2026-09-15-remote-build-design.md. The
+// request body is a tar of the build context; the dockerfile path and
+// build args travel as the X-Oak-Dockerfile and X-Oak-Build-Args headers
+// (the latter a JSON object, possibly absent/empty for no build args).
+//
+// Everything that can still fail as a normal HTTP error -- a bad app name,
+// unparsable headers, a malformed or path-escaping tar -- is checked before
+// any output is written. Once the docker build starts, the contract matches
+// handleDeploy: the response is always 200 OK and the real outcome is the
+// final streamed line, "image <ref>" on success or "error: <message>" on
+// failure.
+func (a *API) handleBuild(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if !appconfig.ValidName(name) {
+		http.Error(w, fmt.Sprintf("invalid app name %q", name), http.StatusBadRequest)
+		return
+	}
+
+	dockerfile := r.Header.Get("X-Oak-Dockerfile")
+	if dockerfile == "" {
+		dockerfile = "Dockerfile"
+	}
+	buildArgs, err := parseBuildArgsHeader(r.Header.Get("X-Oak-Build-Args"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	buildRoot := filepath.Join(a.Deployer.DataDir, "build-tmp")
+	if err := os.MkdirAll(buildRoot, 0755); err != nil {
+		http.Error(w, fmt.Sprintf("mkdir build root: %v", err), http.StatusInternalServerError)
+		return
+	}
+	ctxDir, err := os.MkdirTemp(buildRoot, "")
+	if err != nil {
+		http.Error(w, fmt.Sprintf("create build context dir: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer os.RemoveAll(ctxDir)
+
+	if err := extractBuildContext(r.Body, ctxDir); err != nil {
+		http.Error(w, fmt.Sprintf("extract build context: %v", err), http.StatusBadRequest)
+		return
+	}
+	// dockerfile is as untrusted as any other tar entry name -- it travels
+	// in a header instead of the tar, but a "-f ../../etc/passwd"-shaped
+	// value would otherwise hand docker a path outside ctxDir, so it goes
+	// through the exact same escape guard as every extracted file.
+	dockerfilePath, err := safeExtractPath(ctxDir, dockerfile)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("dockerfile: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	image := fmt.Sprintf("%s/%s:%d", a.Deployer.Registry, name, time.Now().UnixNano())
+	dockerArgs := buildDockerBuildArgs(image, dockerfilePath, ctxDir, buildArgs)
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	fw := flushWriter{w: w, flusher: flusher}
+
+	buildCmd := exec.CommandContext(r.Context(), "docker", dockerArgs...)
+	buildCmd.Stdout = fw
+	buildCmd.Stderr = fw
+	if err := buildCmd.Run(); err != nil {
+		fmt.Fprintf(fw, "error: docker build: %v\n", err)
+		return
+	}
+
+	pushCmd := exec.CommandContext(r.Context(), "docker", "push", image)
+	pushCmd.Stdout = fw
+	pushCmd.Stderr = fw
+	if err := pushCmd.Run(); err != nil {
+		fmt.Fprintf(fw, "error: docker push: %v\n", err)
+		return
+	}
+
+	fmt.Fprintf(fw, "image %s\n", image)
 }
 
 // handleRestart reboots app from its latest stored release, with no

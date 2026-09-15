@@ -93,6 +93,61 @@ func (c *Client) Deploy(ctx context.Context, app, image, tomlText string, out io
 	return nil
 }
 
+// BuildRemote posts contextTar (a tar of the build context) to oakd's
+// POST /apps/{name}/build, the `oak deploy --remote` path -- see
+// docs/plans/2026-09-15-remote-build-design.md and internal/daemon/api.go's
+// handleBuild for the wire contract. dockerfile and buildArgs travel as the
+// X-Oak-Dockerfile and X-Oak-Build-Args headers.
+//
+// Like Deploy, the HTTP status is always 200 once streaming starts; output
+// is streamed to out as it arrives, and the real outcome is the final line:
+// "image <ref>" on success (its ref is BuildRemote's return value) or
+// "error: <message>" on failure, in which case BuildRemote returns an
+// error.
+func (c *Client) BuildRemote(ctx context.Context, app, dockerfile string, buildArgs map[string]string, contextTar io.Reader, out io.Writer) (string, error) {
+	req, err := c.NewRequest(ctx, http.MethodPost, "/apps/"+url.PathEscape(app)+"/build", contextTar)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/x-tar")
+	req.Header.Set("X-Oak-Dockerfile", dockerfile)
+	if len(buildArgs) > 0 {
+		argsJSON, err := json.Marshal(buildArgs)
+		if err != nil {
+			return "", fmt.Errorf("marshal build args: %w", err)
+		}
+		req.Header.Set("X-Oak-Build-Args", string(argsJSON))
+	}
+
+	resp, err := c.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("build request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("build %s: %w", app, httpError(resp))
+	}
+
+	var lastLine string
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		fmt.Fprintln(out, line)
+		lastLine = line
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("read build stream: %w", err)
+	}
+	if strings.HasPrefix(lastLine, "error:") {
+		return "", fmt.Errorf("%s", lastLine)
+	}
+	image, ok := strings.CutPrefix(lastLine, "image ")
+	if !ok {
+		return "", fmt.Errorf("build %s: unexpected final line %q", app, lastLine)
+	}
+	return image, nil
+}
+
 // Restart reboots app from its latest release with no rebuild, streaming
 // progress to out exactly like Deploy (see its doc comment for the wire
 // contract).

@@ -94,6 +94,13 @@ type Deployer struct {
 	LogDir   string
 	Identity *age.X25519Identity // nil if secrets aren't configured; buildGuestEnv skips them then
 
+	// Registry is the local Docker registry handleBuild (internal/daemon/
+	// build.go) pushes remote-build images to: image refs are
+	// "<Registry>/<app>:<unixnano>", the same shape cmd/oak's local
+	// runDeploy pushes to via OAK_REGISTRY. Defaults to "localhost:5000"
+	// via Config.applyDefaults.
+	Registry string
+
 	// BaseCtx is the context passed to Runtime.Start (via
 	// context.WithoutCancel), instead of the per-call ctx a caller like an
 	// HTTP handler passes to Deploy. firecracker-go-sdk's VMCommandBuilder
