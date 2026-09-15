@@ -90,6 +90,24 @@ api_token = "change-me"
 api_port = 7000
 ```
 
+## Static routes
+
+Besides the per-app routes it renders from running machines, `oakd` can also
+expose a host-level service that isn't backed by any oakd-managed
+machine -- e.g. the control panel -- through the same tunnel, at a fixed
+hostname. Add one `[[static_routes]]` array-of-tables entry per service to
+`oakd.toml`:
+
+```toml
+[[static_routes]]
+hostname = "panel.apps.example.com"
+service = "http://127.0.0.1:4000"
+```
+
+As with an app's custom `domains` entries in `oak.toml`, the operator still
+creates the DNS record for `hostname` pointing at the tunnel (same CNAME
+pattern as section 4), and TLS for it is the destination zone's own.
+
 ## 6. Pushing images from the Mac
 
 `oak deploy` runs `docker build`/`docker push` from your Mac against the

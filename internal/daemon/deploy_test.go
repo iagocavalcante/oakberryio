@@ -19,6 +19,7 @@ import (
 	"github.com/iagocavalcante/oakberryio/internal/rootfs"
 	"github.com/iagocavalcante/oakberryio/internal/secrets"
 	"github.com/iagocavalcante/oakberryio/internal/store"
+	"github.com/iagocavalcante/oakberryio/internal/tunnel"
 	"github.com/iagocavalcante/oakberryio/internal/vm"
 )
 
@@ -728,6 +729,41 @@ func TestApplyTunnelRoutesCustomDomainsToSameService(t *testing.T) {
 	oakIdx := strings.Index(config, "hostname: oak.example.com")
 	if !(defaultIdx < firstIdx && firstIdx < secondIdx && secondIdx < oakIdx) {
 		t.Fatalf("route order wrong: default=%d misesnag=%d www=%d oak=%d\n%s", defaultIdx, firstIdx, secondIdx, oakIdx, config)
+	}
+}
+
+func TestApplyTunnelIncludesStaticRoutes(t *testing.T) {
+	d := testDeployer(t, &fakeRuntime{}, &fakeChecker{healthy: true})
+	tunnelConfig := filepath.Join(t.TempDir(), "config.yml")
+	d.Domain = "example.com"
+	d.TunnelID = "tid"
+	d.TunnelConfig = tunnelConfig
+	d.StaticRoutes = []tunnel.Route{{Hostname: "panel.example.com", Service: "http://127.0.0.1:4000"}}
+
+	cfg := baseConfig("hello")
+	cfg.Services = []appconfig.Service{{InternalPort: 8080}}
+	if _, err := d.Deploy(context.Background(), cfg, "img:1", nil); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+
+	raw, err := os.ReadFile(tunnelConfig)
+	if err != nil {
+		t.Fatalf("read tunnel config: %v", err)
+	}
+	config := string(raw)
+
+	if !strings.Contains(config, "hostname: panel.example.com") {
+		t.Fatalf("tunnel config missing static route hostname: %s", config)
+	}
+	if !strings.Contains(config, "service: http://127.0.0.1:4000") {
+		t.Fatalf("tunnel config missing static route service: %s", config)
+	}
+
+	appIdx := strings.Index(config, "hostname: hello.example.com")
+	staticIdx := strings.Index(config, "hostname: panel.example.com")
+	oakIdx := strings.Index(config, "hostname: oak.example.com")
+	if !(appIdx < staticIdx && staticIdx < oakIdx) {
+		t.Fatalf("route order wrong: app=%d static=%d oak=%d\n%s", appIdx, staticIdx, oakIdx, config)
 	}
 }
 

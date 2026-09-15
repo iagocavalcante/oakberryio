@@ -14,11 +14,13 @@ import (
 
 	"filippo.io/age"
 
+	"github.com/iagocavalcante/oakberryio/internal/appconfig"
 	"github.com/iagocavalcante/oakberryio/internal/dns"
 	"github.com/iagocavalcante/oakberryio/internal/metrics"
 	"github.com/iagocavalcante/oakberryio/internal/mmds"
 	"github.com/iagocavalcante/oakberryio/internal/secrets"
 	"github.com/iagocavalcante/oakberryio/internal/store"
+	"github.com/iagocavalcante/oakberryio/internal/tunnel"
 	"github.com/iagocavalcante/oakberryio/internal/vm"
 )
 
@@ -51,6 +53,14 @@ func (h *metricsHolder) get() metrics.Snapshot {
 	return h.snap
 }
 
+// StaticRoute is one operator-configured cloudflared ingress rule that
+// isn't tied to any running app machine -- e.g. exposing a host-level
+// service like the control panel. See docs/host.md ("Static routes").
+type StaticRoute struct {
+	Hostname string `toml:"hostname"`
+	Service  string `toml:"service"`
+}
+
 // Config is oakd's configuration, loaded from /etc/oak/oakd.toml.
 type Config struct {
 	DataDir      string `toml:"data_dir"`
@@ -64,8 +74,13 @@ type Config struct {
 	// /root/.cloudflared/<tunnel_id>.json (where `cloudflared tunnel
 	// create` writes it as root, per docs/host.md) when left empty.
 	TunnelCreds string `toml:"tunnel_creds"`
-	KeyFile     string `toml:"key_file"`
-	Socket      string `toml:"socket"`
+	// StaticRoutes are extra cloudflared ingress rules applied verbatim on
+	// top of the per-app machine routes -- for a host service that isn't
+	// backed by any oakd-managed machine (e.g. the control panel). See
+	// docs/host.md.
+	StaticRoutes []StaticRoute `toml:"static_routes"`
+	KeyFile      string        `toml:"key_file"`
+	Socket       string        `toml:"socket"`
 
 	// LogDir and APIToken are new fields for Task 8; see docs/host.md.
 	LogDir   string `toml:"log_dir"`
@@ -133,6 +148,15 @@ func New(ctx context.Context, cfg Config) (*Daemon, error) {
 		}
 	}
 
+	var staticRoutes []tunnel.Route
+	for _, r := range cfg.StaticRoutes {
+		if !appconfig.ValidDomain(r.Hostname) {
+			log.Printf("oakd: static route %q: invalid hostname, skipping", r.Hostname)
+			continue
+		}
+		staticRoutes = append(staticRoutes, tunnel.Route{Hostname: r.Hostname, Service: r.Service})
+	}
+
 	deployer := &Deployer{
 		Store:        st,
 		Runtime:      FirecrackerRuntime{},
@@ -147,6 +171,7 @@ func New(ctx context.Context, cfg Config) (*Daemon, error) {
 		TunnelConfig: cfg.TunnelConfig,
 		TunnelCreds:  cfg.TunnelCreds,
 		APIPort:      cfg.APIPort,
+		StaticRoutes: staticRoutes,
 	}
 
 	if err := os.MkdirAll(deployer.socketDir(), 0755); err != nil {

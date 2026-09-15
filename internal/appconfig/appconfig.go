@@ -13,8 +13,8 @@ var nameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`)
 // hyphens in each dot-separated label (1-63 chars per label), at least one
 // dot. It's intentionally permissive about real-world DNS rules (no check
 // that labels don't start/end with a hyphen) since this only guards against
-// obviously malformed entries in oak.toml before they're templated into
-// cloudflared's ingress config.
+// obviously malformed entries before they're templated into cloudflared's
+// ingress config. See ValidDomain.
 var domainRe = regexp.MustCompile(`^[a-z0-9-]{1,63}(\.[a-z0-9-]{1,63})+$`)
 
 // ValidName reports whether name is a valid app name: lowercase letters,
@@ -23,6 +23,14 @@ var domainRe = regexp.MustCompile(`^[a-z0-9-]{1,63}(\.[a-z0-9-]{1,63})+$`)
 // before they're used to build filesystem paths or SQL lookups.
 func ValidName(name string) bool {
 	return nameRe.MatchString(name)
+}
+
+// ValidDomain reports whether d is a plausible DNS hostname (see domainRe).
+// Shared with internal/daemon so a static route's hostname gets the same
+// validation as an app's custom Domains before being templated into
+// cloudflared's ingress config.
+func ValidDomain(d string) bool {
+	return domainRe.MatchString(d)
 }
 
 type Config struct {
@@ -81,7 +89,7 @@ func Parse(b []byte) (*Config, error) {
 		c.Build.Dockerfile = "Dockerfile"
 	}
 	for _, d := range c.Domains {
-		if !domainRe.MatchString(d) {
+		if !ValidDomain(d) {
 			return nil, fmt.Errorf("domain %q: must be a valid hostname (lowercase letters, digits, hyphens, dot-separated labels)", d)
 		}
 	}

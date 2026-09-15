@@ -122,6 +122,11 @@ type Deployer struct {
 	TunnelCreds  string // cloudflared credentials-file path; defaults per credsFile()
 	APIPort      int
 
+	// StaticRoutes are extra ingress rules applyTunnel appends verbatim
+	// after the per-app machine routes and before the oak.<domain> API
+	// route -- see Config.StaticRoutes in daemon.go.
+	StaticRoutes []tunnel.Route
+
 	// HealthTimeout/HealthInterval override the health-check poll budget
 	// (default 60s / 1s) -- present so tests can exercise a failing health
 	// check without actually waiting a minute.
@@ -879,9 +884,10 @@ func envSliceToMap(env []string) map[string]string {
 }
 
 // applyTunnel re-renders and applies the cloudflared config from every
-// currently running machine across all apps, plus the fixed route to oak's
-// own API. A no-op when the tunnel isn't configured (e.g. TunnelID unset in
-// tests or before the operator has run `cloudflared tunnel create`).
+// currently running machine across all apps, plus any configured static
+// routes, plus the fixed route to oak's own API. A no-op when the tunnel
+// isn't configured (e.g. TunnelID unset in tests or before the operator has
+// run `cloudflared tunnel create`).
 func (d *Deployer) applyTunnel(ctx context.Context) error {
 	if d.TunnelID == "" || d.TunnelConfig == "" {
 		return nil
@@ -915,6 +921,9 @@ func (d *Deployer) applyTunnel(ctx context.Context) error {
 			})
 		}
 	}
+
+	routes = append(routes, d.StaticRoutes...)
+
 	routes = append(routes, tunnel.Route{
 		Hostname: fmt.Sprintf("oak.%s", d.Domain),
 		Service:  fmt.Sprintf("http://127.0.0.1:%d", d.APIPort),
