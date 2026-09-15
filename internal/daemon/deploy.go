@@ -1058,13 +1058,17 @@ func readLastLines(path string, n int) string {
 const childExitMarker = "oak-init: child-exit status="
 
 // lastChildExitStatus scans the guest console log at path for the LAST
-// childExitMarker line and returns the status it reports. It reads from the
-// end of the log (rather than the first match) so an application that
-// happens to print similar-looking text to its own stdout earlier in the
-// log -- which lands in the same file -- can never be mistaken for the real
-// marker oak-init itself prints exactly once, at the very end. ok is false
-// if the marker never appears (e.g. the guest crashed or was killed before
-// oak-init could print it) or the log can't be read at all.
+// childExitMarker and returns the status it reports. It reads from the end of
+// the log (rather than the first match) so an application that happens to
+// print similar-looking text to its own stdout earlier in the log -- which
+// lands in the same file -- can never be mistaken for the real marker
+// oak-init prints exactly once, at the very end. The marker is matched as a
+// substring anywhere in the line, not just at the line start: the guest's own
+// last output can share the line with it (e.g. Elixir's Logger emits a
+// trailing ANSI reset "\x1b[0m" that ends up right before oak-init's marker),
+// so a prefix match would miss it. ok is false if the marker never appears
+// (e.g. the guest crashed before oak-init could print it) or the log can't be
+// read at all.
 func lastChildExitStatus(path string) (status int, ok bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -1072,11 +1076,18 @@ func lastChildExitStatus(path string) (status int, ok bool) {
 	}
 	lines := strings.Split(string(data), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
-		rest, found := strings.CutPrefix(strings.TrimSpace(lines[i]), childExitMarker)
-		if !found {
+		idx := strings.LastIndex(lines[i], childExitMarker)
+		if idx < 0 {
 			continue
 		}
-		n, err := strconv.Atoi(rest)
+		rest := lines[i][idx+len(childExitMarker):]
+		// Take the leading (optionally negative) integer, ignoring any
+		// trailing junk on the line (carriage returns, escape codes).
+		end := 0
+		for end < len(rest) && (rest[end] == '-' || (rest[end] >= '0' && rest[end] <= '9')) {
+			end++
+		}
+		n, err := strconv.Atoi(rest[:end])
 		if err != nil {
 			return 0, false
 		}
