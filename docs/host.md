@@ -116,6 +116,28 @@ As with an app's custom `domains` entries in `oak.toml`, the operator still
 creates the DNS record for `hostname` pointing at the tunnel (same CNAME
 pattern as section 4), and TLS for it is the destination zone's own.
 
+## Deploying updates to the box
+
+`make install BOX=oak@<host>` builds the Linux binaries, copies them over, and
+installs `oakd`/`oak-init`/`oak` plus the systemd units, then restarts `oakd`.
+Two things to know:
+
+- **Restarting `oakd` reboots every running microVM.** An `oakd` restart kills
+  the Firecracker children, so on start it reconciles and boots a fresh VM for
+  each `running` machine (with the current `/24` subnet + bridge). Expect a
+  brief blip on every app during the deploy; the tunnel is bounced too when the
+  ingress is re-applied.
+- **The nftables ruleset is not touched by `make install`.** The `oak*`
+  per-tenant rules live in `/etc/nftables.d/oak.nft`, written by
+  `scripts/host-setup.sh`. Re-run that (or re-apply the file with `nft -f`) when
+  the isolation rules change. The `DOCKER-USER` mirror is in
+  `oak-docker-forward.service`, which `make install` does restart.
+- **oak-panel survives `oakd` restarts on its own.** It bind-mounts the socket
+  *directory* `/run/oak`, so it follows the recreated socket with no manual
+  bounce. Relaunch it (new image or run flags) with
+  `oak-panel/scripts/run-panel.sh`, which reads secrets from a root-only
+  `/etc/oak-panel.env`.
+
 ## 6. Pushing images from the Mac
 
 `oak deploy` runs `docker build`/`docker push` from your Mac against the
