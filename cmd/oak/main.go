@@ -24,6 +24,11 @@ import (
 	"github.com/iagocavalcante/oakberryio/internal/cli"
 )
 
+// version is the oak CLI's version, injected at build time via
+// -ldflags "-X main.version=...". Defaults to "dev" for local builds run
+// without that flag (e.g. plain `go build` or `go run`).
+var version = "dev"
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -32,6 +37,9 @@ func main() {
 
 	var err error
 	switch os.Args[1] {
+	case "version", "--version", "-version":
+		fmt.Println(version)
+		return
 	case "deploy":
 		err = runDeploy(os.Args[2:])
 	case "apps":

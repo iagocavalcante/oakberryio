@@ -4,3 +4,6 @@ build/
 
 # local secrets (never commit)
 .pass
+
+# goreleaser output
+dist/
