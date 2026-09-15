@@ -730,11 +730,11 @@ func TestApplyTunnelRoutesCustomDomainsToSameService(t *testing.T) {
 	}
 
 	// Default hostname first, then custom domains in declared order, before
-	// the oak.<domain> catch-all.
+	// the oakberryio.<domain> catch-all.
 	defaultIdx := strings.Index(config, "hostname: hello.example.com")
 	firstIdx := strings.Index(config, "hostname: misesnag.app")
 	secondIdx := strings.Index(config, "hostname: www.misesnag.app")
-	oakIdx := strings.Index(config, "hostname: oak.example.com")
+	oakIdx := strings.Index(config, "hostname: oakberryio.example.com")
 	if !(defaultIdx < firstIdx && firstIdx < secondIdx && secondIdx < oakIdx) {
 		t.Fatalf("route order wrong: default=%d misesnag=%d www=%d oak=%d\n%s", defaultIdx, firstIdx, secondIdx, oakIdx, config)
 	}
@@ -769,7 +769,7 @@ func TestApplyTunnelIncludesStaticRoutes(t *testing.T) {
 
 	appIdx := strings.Index(config, "hostname: hello.example.com")
 	staticIdx := strings.Index(config, "hostname: panel.example.com")
-	oakIdx := strings.Index(config, "hostname: oak.example.com")
+	oakIdx := strings.Index(config, "hostname: oakberryio.example.com")
 	if !(appIdx < staticIdx && staticIdx < oakIdx) {
 		t.Fatalf("route order wrong: app=%d static=%d oak=%d\n%s", appIdx, staticIdx, oakIdx, config)
 	}

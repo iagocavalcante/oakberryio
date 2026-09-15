@@ -91,7 +91,7 @@ key_file = "/etc/oak/key"
 socket = "/run/oak/oak.sock"
 log_dir = "/var/log/oak"
 # api_token is required on every request to oakd's TCP listener
-# (127.0.0.1:api_port, tunneled as oak.<domain>) as "Authorization: Bearer
+# (127.0.0.1:api_port, tunneled as oakberryio.<domain>) as "Authorization: Bearer
 # <api_token>"; the unix socket at `socket` needs no token since it's
 # trusted local access. Generate one with `openssl rand -hex 32`.
 api_token = "change-me"

@@ -148,7 +148,7 @@ type Deployer struct {
 	APIPort      int
 
 	// StaticRoutes are extra ingress rules applyTunnel appends verbatim
-	// after the per-app machine routes and before the oak.<domain> API
+	// after the per-app machine routes and before the oakberryio.<domain> API
 	// route -- see Config.StaticRoutes in daemon.go.
 	StaticRoutes []tunnel.Route
 
@@ -970,7 +970,7 @@ func (d *Deployer) applyTunnel(ctx context.Context) error {
 	routes = append(routes, d.StaticRoutes...)
 
 	routes = append(routes, tunnel.Route{
-		Hostname: fmt.Sprintf("oak.%s", d.Domain),
+		Hostname: fmt.Sprintf("oakberryio.%s", d.Domain),
 		Service:  fmt.Sprintf("http://127.0.0.1:%d", d.APIPort),
 	})
 

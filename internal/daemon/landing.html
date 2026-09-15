@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>oakberryio — Fly.io for your homelab</title>
+<meta name="description" content="Deploy real apps to your own hardware in Firecracker microVMs. Open source, MIT-licensed.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+<style>
+  :root {
+    --color-blush-cream: #f3eae5;
+    --color-deep-indigo: #000647;
+    --color-pure-white: #ffffff;
+    --color-graphite: #3e3c43;
+    --color-mid-stone: #7a7780;
+    --color-coral-pop: #ff7e85;
+    --color-electric-violet: #0e1889;
+    --color-magenta: #dd59cf;
+    --color-sunset-coral: #ff7399;
+    --color-deep-teal: #206871;
+    --color-bright-teal: #118391;
+    --color-persimmon: #ffa541;
+    --color-muted-lilac: #7c80ad;
+    --color-fern-green: #40ac76;
+    --color-bubblegum-wash: #fdd7f5;
+    --color-mint-wash: #bdedd5;
+    --color-peach-wash: #fdd5c3;
+
+    --font-display: 'Inter', ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --font-body: 'Helvetica Neue', 'Inter', ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+
+    --page-max: 1200px;
+    --section-gap: 120px;
+    --radius: 4px;
+    --radius-feature: 15px;
+
+    --grad-headline: linear-gradient(90deg, #0e1889 0%, #dd59cf 50%, #ff7399 100%);
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--color-blush-cream);
+    color: var(--color-graphite);
+    font-family: var(--font-body);
+    font-size: 16px;
+    line-height: 1.56;
+    -webkit-font-smoothing: antialiased;
+  }
+  img, svg { max-width: 100%; display: block; }
+  a { color: inherit; }
+
+  .ui {
+    font-family: var(--font-display);
+    font-weight: 500;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    font-size: 14px;
+  }
+
+  .wrap { max-width: var(--page-max); margin: 0 auto; padding-inline: 24px; }
+
+  /* Buttons */
+  .btn {
+    display: inline-flex; align-items: center; gap: 10px;
+    font-family: var(--font-display); font-weight: 500;
+    font-size: 16px; letter-spacing: 0.2em; text-transform: uppercase;
+    padding: 18px 22px; border-radius: var(--radius);
+    border: 1px solid transparent; text-decoration: none; cursor: pointer;
+    transition: transform .12s ease, background .12s ease, color .12s ease;
+  }
+  .btn:hover { transform: translateY(-2px); }
+  .btn-coral { background: var(--color-coral-pop); color: var(--color-pure-white); }
+  .btn-coral:hover { background: #ff6b73; }
+  .btn-ghost-light { background: transparent; color: var(--color-pure-white); border-color: rgba(255,255,255,.55); }
+  .btn-ghost-light:hover { background: rgba(255,255,255,.08); }
+  .btn-ghost-dark { background: transparent; color: var(--color-electric-violet); border-color: var(--color-muted-lilac); }
+  .btn-ghost-dark:hover { background: rgba(124,128,173,.10); }
+
+  /* ---------- Hero (indigo band) ---------- */
+  .hero { background: var(--color-deep-indigo); color: var(--color-pure-white); }
+
+  nav {
+    display: flex; align-items: center; gap: 28px;
+    padding-block: 26px;
+  }
+  .brand { display: flex; align-items: center; gap: 12px; font-family: var(--font-display); font-weight: 600; font-size: 20px; letter-spacing: .01em; }
+  .brand .mark { width: 34px; height: 34px; }
+  nav .links { display: flex; gap: 28px; margin-left: 20px; }
+  nav .links a { text-decoration: none; color: rgba(255,255,255,.86); }
+  nav .links a:hover { color: #fff; }
+  nav .spacer { flex: 1; }
+  nav .links a, nav .brand { }
+
+  .hero-grid {
+    display: grid; grid-template-columns: 1.05fr .95fr; gap: 40px; align-items: center;
+    padding-block: 40px 96px;
+  }
+  .badge {
+    display: inline-flex; align-items: center; gap: 8px;
+    border: 1px solid var(--color-fern-green); color: var(--color-fern-green);
+    border-radius: var(--radius); padding: 8px 14px; margin-bottom: 28px;
+    font-family: var(--font-display); font-weight: 500; letter-spacing: .16em; text-transform: uppercase; font-size: 13px;
+  }
+  .badge .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--color-fern-green); }
+  h1.hero-title {
+    font-family: var(--font-display); font-weight: 600;
+    font-size: clamp(44px, 8vw, 83px); line-height: .95; letter-spacing: -0.02em;
+    margin: 0 0 24px; text-wrap: balance;
+  }
+  h1 .accent { color: var(--color-coral-pop); }
+  .hero-sub { font-size: 18px; line-height: 1.5; color: #c7c9e6; max-width: 44ch; margin: 0 0 36px; }
+  .hero-cta { display: flex; flex-wrap: wrap; gap: 16px; }
+  .hero-art { display: flex; justify-content: center; }
+
+  /* ---------- Light sections ---------- */
+  section { padding-block: var(--section-gap); }
+  .eyebrow { font-family: var(--font-display); font-weight: 500; letter-spacing: .2em; text-transform: uppercase; font-size: 14px; color: var(--color-deep-teal); margin: 0 0 18px; }
+  h2 {
+    font-family: var(--font-display); font-weight: 600;
+    font-size: clamp(34px, 5vw, 56px); line-height: 1.04; letter-spacing: -0.015em;
+    margin: 0 0 20px; text-wrap: balance;
+  }
+  .gradient-text {
+    background: var(--grad-headline);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  h3 { font-family: var(--font-display); font-weight: 600; font-size: 22px; line-height: 1.2; margin: 0 0 10px; }
+  p.lead { font-size: 18px; line-height: 1.5; color: var(--color-graphite); max-width: 60ch; }
+  p.muted { color: var(--color-mid-stone); }
+
+  .section-head { max-width: 720px; margin-bottom: 56px; }
+
+  /* Feature row */
+  .features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 48px 40px; }
+  .feature .icon { width: 60px; height: 60px; border-radius: 50%; display: grid; place-items: center; margin-bottom: 20px; }
+  .feature p { font-size: 15px; line-height: 1.4; color: var(--color-mid-stone); margin: 0; }
+
+  /* Split section */
+  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 64px; align-items: center; }
+  .split.reverse .split-art { order: 2; }
+  .split-art { display: flex; justify-content: center; }
+  .split ul { list-style: none; padding: 0; margin: 24px 0 0; display: grid; gap: 14px; }
+  .split li { display: flex; gap: 12px; align-items: flex-start; font-size: 16px; }
+  .split li .tick { flex: 0 0 auto; width: 22px; height: 22px; margin-top: 2px; }
+
+  /* Code block */
+  .code {
+    background: var(--color-deep-indigo); color: #e8e9ff; border-radius: var(--radius-feature);
+    padding: 28px 30px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 14px; line-height: 1.9; overflow-x: auto;
+  }
+  .code .c { color: #7c80ad; }
+  .code .p { color: var(--color-coral-pop); }
+  .code .g { color: var(--color-fern-green); }
+  .steps { display: grid; gap: 12px; margin: 0 0 28px; padding: 0; list-style: none; counter-reset: step; }
+  .steps li { display: flex; gap: 16px; align-items: baseline; }
+  .steps li .n { font-family: var(--font-display); font-weight: 600; font-size: 20px; background: var(--grad-headline); -webkit-background-clip: text; background-clip: text; color: transparent; min-width: 28px; }
+
+  /* Divider band tint */
+  .band { background: var(--color-deep-indigo); color: var(--color-pure-white); border-radius: 0; }
+  .band h2 { color: var(--color-pure-white); }
+  .band .eyebrow { color: var(--color-sunset-coral); }
+  .band p.lead { color: #c7c9e6; }
+
+  /* CTA final */
+  .final { text-align: center; }
+  .final .section-head { margin: 0 auto 40px; }
+  .final .hero-cta { justify-content: center; }
+
+  /* Footer */
+  footer { border-top: 1px solid #e2d6cf; padding-block: 48px; }
+  .foot { display: flex; flex-wrap: wrap; gap: 24px; align-items: center; }
+  .foot .spacer { flex: 1; }
+  .foot a { color: var(--color-muted-lilac); text-decoration: none; border-bottom: 1px solid var(--color-muted-lilac); font-size: 15px; }
+  .foot .brand { color: var(--color-graphite); }
+  .foot small { color: var(--color-mid-stone); }
+
+  :focus-visible { outline: 3px solid var(--color-electric-violet); outline-offset: 2px; border-radius: 2px; }
+
+  @media (max-width: 880px) {
+    .hero-grid { grid-template-columns: 1fr; padding-block: 20px 72px; }
+    .hero-art { order: -1; }
+    .features { grid-template-columns: 1fr; gap: 44px; }
+    .split { grid-template-columns: 1fr; gap: 36px; }
+    .split.reverse .split-art { order: -1; }
+    .split-art { order: -1; }
+    nav .links { display: none; }
+    :root { --section-gap: 84px; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+
+<!-- ============ HERO ============ -->
+<header class="hero">
+  <div class="wrap">
+    <nav>
+      <span class="brand">
+        <svg class="mark" viewBox="0 0 40 40" fill="none" aria-hidden="true">
+          <circle cx="20" cy="22" r="14" fill="#ff7e85"/>
+          <circle cx="14" cy="17" r="4.5" fill="#dd59cf"/>
+          <circle cx="26" cy="17" r="4.5" fill="#0e1889"/>
+          <circle cx="20" cy="26" r="4.5" fill="#ffa541"/>
+          <path d="M20 8c2 -4 7 -5 9 -3 -1 3 -4 6 -9 6z" fill="#40ac76"/>
+        </svg>
+        oakberryio
+      </span>
+      <span class="links">
+        <a href="#features">Features</a>
+        <a href="#how">How it works</a>
+        <a href="#deploy">Deploy</a>
+        <a href="https://github.com/iagocavalcante/oakberryio">GitHub</a>
+      </span>
+      <span class="spacer"></span>
+      <a class="btn btn-ghost-light" href="#deploy">Get started</a>
+    </nav>
+
+    <div class="hero-grid">
+      <div>
+        <span class="badge"><span class="dot"></span>Open source · MIT</span>
+        <h1 class="hero-title">Fly.io for your <span class="accent">homelab.</span></h1>
+        <p class="hero-sub">Deploy real apps to your own hardware. oakberryio builds your app, boots it in a Firecracker microVM, waits for its health check, and serves it over a Cloudflare Tunnel. No Kubernetes. No cloud bill.</p>
+        <div class="hero-cta">
+          <a class="btn btn-coral" href="#deploy">Deploy your first app</a>
+          <a class="btn btn-ghost-light" href="https://github.com/iagocavalcante/oakberryio">View on GitHub</a>
+        </div>
+      </div>
+      <div class="hero-art">
+        <svg viewBox="0 0 420 380" width="420" fill="none" aria-hidden="true">
+          <!-- blobs -->
+          <path d="M70 120c-30 40-20 120 40 140s150 10 190-40 30-140-30-170-120-20-160 20-10 10-40 50z" fill="#0e1889"/>
+          <circle cx="300" cy="90" r="52" fill="#dd59cf"/>
+          <circle cx="120" cy="80" r="30" fill="#ffa541"/>
+          <!-- stacked microVM cards -->
+          <g>
+            <rect x="120" y="150" width="180" height="52" rx="8" fill="#fdd7f5"/>
+            <rect x="135" y="168" width="60" height="16" rx="4" fill="#0e1889"/>
+            <circle cx="280" cy="176" r="8" fill="#40ac76"/>
+            <rect x="105" y="212" width="180" height="52" rx="8" fill="#bdedd5"/>
+            <rect x="120" y="230" width="70" height="16" rx="4" fill="#206871"/>
+            <circle cx="265" cy="238" r="8" fill="#40ac76"/>
+            <rect x="130" y="274" width="180" height="52" rx="8" fill="#fdd5c3"/>
+            <rect x="145" y="292" width="52" height="16" rx="4" fill="#ff7399"/>
+            <circle cx="290" cy="300" r="8" fill="#40ac76"/>
+          </g>
+          <!-- spark -->
+          <path d="M330 250l10-26 10 26 26 10-26 10-10 26-10-26-26-10z" fill="#ff7e85"/>
+        </svg>
+      </div>
+    </div>
+  </div>
+</header>
+
+<!-- ============ FEATURES ============ -->
+<section id="features">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">What you get</p>
+      <h2>A tiny PaaS that runs <span class="gradient-text">entirely on your box.</span></h2>
+      <p class="lead muted">Push an <code>oak.toml</code> and oakberryio handles the build, the microVM, the health check, and the ingress. The parts you'd normally rent, running on hardware you already own.</p>
+    </div>
+
+    <div class="features">
+      <div class="feature">
+        <div class="icon" style="background:var(--color-bubblegum-wash)">
+          <svg width="30" height="30" viewBox="0 0 24 24" fill="none"><rect x="3" y="4" width="18" height="12" rx="2" stroke="#0e1889" stroke-width="2"/><path d="M8 20h8M12 16v4" stroke="#dd59cf" stroke-width="2" stroke-linecap="round"/></svg>
+        </div>
+        <h3>Firecracker microVMs</h3>
+        <p>Every app runs in its own microVM with a real kernel, not a shared-kernel container. Real isolation, sub-second boots.</p>
+      </div>
+      <div class="feature">
+        <div class="icon" style="background:var(--color-mint-wash)">
+          <svg width="30" height="30" viewBox="0 0 24 24" fill="none"><path d="M6 3h9l4 4v14H6z" stroke="#206871" stroke-width="2" stroke-linejoin="round"/><path d="M9 12h7M9 16h7M9 8h3" stroke="#118391" stroke-width="2" stroke-linecap="round"/></svg>
+        </div>
+        <h3>oak.toml manifests</h3>
+        <p>Declare your image, ports, env, volumes and VM size in one file — the same idea as <code>fly.toml</code>. Deploy with a single command.</p>
+      </div>
+      <div class="feature">
+        <div class="icon" style="background:var(--color-peach-wash)">
+          <svg width="30" height="30" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="#0e1889" stroke-width="2"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18" stroke="#ff7399" stroke-width="2"/></svg>
+        </div>
+        <h3>Tunnel ingress</h3>
+        <p>Each app gets a public hostname through a Cloudflare Tunnel. Zero open ports, automatic TLS, custom domains when you want them.</p>
+      </div>
+      <div class="feature">
+        <div class="icon" style="background:var(--color-mint-wash)">
+          <svg width="30" height="30" viewBox="0 0 24 24" fill="none"><ellipse cx="12" cy="6" rx="8" ry="3" stroke="#206871" stroke-width="2"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6" stroke="#206871" stroke-width="2"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3" stroke="#40ac76" stroke-width="2"/></svg>
+        </div>
+        <h3>Persistent volumes</h3>
+        <p>Attach a volume and run stateful apps — a real Postgres with its data on disk survives redeploys and reboots.</p>
+      </div>
+      <div class="feature">
+        <div class="icon" style="background:var(--color-bubblegum-wash)">
+          <svg width="30" height="30" viewBox="0 0 24 24" fill="none"><rect x="3" y="5" width="18" height="14" rx="2" stroke="#0e1889" stroke-width="2"/><path d="M7 10l3 2-3 2M13 14h4" stroke="#dd59cf" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+        <h3>oak ssh</h3>
+        <p>Drop straight into a shell inside any running microVM over vsock — no sshd, no keys to manage, no ports exposed.</p>
+      </div>
+      <div class="feature">
+        <div class="icon" style="background:var(--color-peach-wash)">
+          <svg width="30" height="30" viewBox="0 0 24 24" fill="none"><path d="M12 3l7 3v6c0 5-3.5 7.5-7 9-3.5-1.5-7-4-7-9V6z" stroke="#206871" stroke-width="2" stroke-linejoin="round"/><path d="M9 12l2 2 4-4" stroke="#40ac76" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+        <h3>Per-tenant isolation</h3>
+        <p>Give friends access and each tenant's apps get their own subnet and bridge — no one reaches another tenant's services or your databases.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ DEPLOY / HOW IT WORKS ============ -->
+<section id="deploy">
+  <div class="wrap">
+    <div class="split">
+      <div>
+        <p class="eyebrow">How it works</p>
+        <h2 class="gradient-text">Deploy in three steps.</h2>
+        <ol class="steps">
+          <li><span class="n">1</span><span>Install the CLI on your laptop.</span></li>
+          <li><span class="n">2</span><span>Bring up a Linux box once with the bootstrap script.</span></li>
+          <li><span class="n">3</span><span>Run <code>oak deploy</code> from any app with an <code>oak.toml</code>.</span></li>
+        </ol>
+        <p class="muted">That's the whole loop. Build, boot, health-check, cut over — zero downtime, every deploy.</p>
+      </div>
+      <div class="split-art">
+        <div class="code" style="width:100%">
+<span class="c"># install the CLI</span><br>
+curl -fsSL oakberryio.iagocavalcante.com/install.sh | sh<br><br>
+<span class="c"># from your app directory</span><br>
+<span class="p">oak</span> deploy<br>
+<span class="c">building rootfs...</span><br>
+<span class="c">starting machine...</span><br>
+<span class="c">waiting for health check...</span><br>
+<span class="g">ok</span> hello  <span class="c">→ hello.your-domain.com</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SPLIT: isolation (dark band) ============ -->
+<section class="band">
+  <div class="wrap">
+    <div class="split reverse">
+      <div class="split-art">
+        <svg viewBox="0 0 380 300" width="380" fill="none" aria-hidden="true">
+          <rect x="20" y="60" width="150" height="180" rx="14" fill="#0e1889" stroke="#7c80ad" stroke-width="2"/>
+          <rect x="210" y="60" width="150" height="180" rx="14" fill="#0e1889" stroke="#7c80ad" stroke-width="2"/>
+          <rect x="40" y="88" width="110" height="30" rx="6" fill="#dd59cf"/>
+          <rect x="40" y="128" width="110" height="30" rx="6" fill="#ff7399"/>
+          <rect x="40" y="168" width="110" height="30" rx="6" fill="#ffa541"/>
+          <rect x="230" y="88" width="110" height="30" rx="6" fill="#118391"/>
+          <rect x="230" y="128" width="110" height="30" rx="6" fill="#40ac76"/>
+          <rect x="230" y="168" width="110" height="30" rx="6" fill="#bdedd5"/>
+          <path d="M170 150h40" stroke="#ff7e85" stroke-width="3" stroke-dasharray="6 8"/>
+          <circle cx="190" cy="150" r="16" fill="#ff7e85"/>
+          <path d="M184 150l4 4 8-9" stroke="#000647" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        </svg>
+      </div>
+      <div>
+        <p class="eyebrow">Multi-tenant, safely</p>
+        <h2>Give friends a box, not your database.</h2>
+        <p class="lead">Every owner's apps land on their own subnet and Linux bridge. Cross-tenant traffic is routed through the host and dropped, and internal DNS only resolves your own apps. Invite people in without handing over the keys.</p>
+        <ul>
+          <li><svg class="tick" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="11" fill="#40ac76"/><path d="M7 12l3 3 6-7" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Per-tenant subnets and bridges</span></li>
+          <li><svg class="tick" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="11" fill="#40ac76"/><path d="M7 12l3 3 6-7" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Source-scoped internal DNS</span></li>
+          <li><svg class="tick" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="11" fill="#40ac76"/><path d="M7 12l3 3 6-7" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span>GitHub-auth'd web control panel</span></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SPLIT: stateful ============ -->
+<section>
+  <div class="wrap">
+    <div class="split">
+      <div class="split-art">
+        <svg viewBox="0 0 380 300" width="380" fill="none" aria-hidden="true">
+          <circle cx="200" cy="150" r="120" fill="#fdd7f5"/>
+          <ellipse cx="190" cy="95" rx="70" ry="24" fill="#206871"/>
+          <path d="M120 95v90c0 13 31 24 70 24s70-11 70-24V95" fill="#118391"/>
+          <ellipse cx="190" cy="95" rx="70" ry="24" fill="#40ac76"/>
+          <path d="M120 140c0 13 31 24 70 24s70-11 70-24M120 170c0 13 31 24 70 24s70-11 70-24" stroke="#f3eae5" stroke-width="4" fill="none"/>
+          <path d="M300 210l8-20 8 20 20 8-20 8-8 20-8-20-20-8z" fill="#ffa541"/>
+          <circle cx="90" cy="70" r="16" fill="#ff7399"/>
+        </svg>
+      </div>
+      <div>
+        <p class="eyebrow">Stateful apps</p>
+        <h2 class="gradient-text">Real volumes, real Postgres.</h2>
+        <p class="lead">Declare a mount in your <code>oak.toml</code> and oakberryio gives the microVM a persistent disk. Run a database on your own metal, back it up, and keep the data across every redeploy.</p>
+        <ul>
+          <li><svg class="tick" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="11" fill="#ff7e85"/><path d="M7 12l3 3 6-7" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Persistent volumes attached at any path</span></li>
+          <li><svg class="tick" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="11" fill="#ff7e85"/><path d="M7 12l3 3 6-7" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span>TCP or HTTP health checks before cutover</span></li>
+          <li><svg class="tick" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="11" fill="#ff7e85"/><path d="M7 12l3 3 6-7" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Release commands for migrations</span></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ FINAL CTA ============ -->
+<section class="final">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">Bring your own hardware</p>
+      <h2>Your homelab is a <span class="gradient-text">platform</span> now.</h2>
+      <p class="lead muted" style="margin-inline:auto">An old mini-PC, a spare server, a Raspberry-class board with KVM — if it runs Linux and Firecracker, it runs oakberryio. Grab the CLI and deploy something tonight.</p>
+    </div>
+    <div class="hero-cta">
+      <a class="btn btn-coral" href="https://github.com/iagocavalcante/oakberryio">Read the docs</a>
+      <a class="btn btn-ghost-dark" href="https://github.com/iagocavalcante/oakberryio">Star on GitHub</a>
+    </div>
+  </div>
+</section>
+
+<!-- ============ FOOTER ============ -->
+<footer>
+  <div class="wrap foot">
+    <span class="brand" style="display:flex;align-items:center;gap:10px;font-family:var(--font-display);font-weight:600;font-size:18px;">
+      <svg width="26" height="26" viewBox="0 0 40 40" fill="none" aria-hidden="true"><circle cx="20" cy="22" r="14" fill="#ff7e85"/><circle cx="14" cy="17" r="4.5" fill="#dd59cf"/><circle cx="26" cy="17" r="4.5" fill="#0e1889"/><circle cx="20" cy="26" r="4.5" fill="#ffa541"/><path d="M20 8c2 -4 7 -5 9 -3 -1 3 -4 6 -9 6z" fill="#40ac76"/></svg>
+      oakberryio
+    </span>
+    <span class="spacer"></span>
+    <a href="https://github.com/iagocavalcante/oakberryio">GitHub</a>
+    <a href="https://github.com/iagocavalcante/oakberryio#readme">Docs</a>
+    <a href="https://github.com/iagocavalcante/oakberryio/blob/main/LICENSE">MIT License</a>
+    <small>Built by Iago Cavalcante</small>
+  </div>
+</footer>
+
+</body>
+</html>

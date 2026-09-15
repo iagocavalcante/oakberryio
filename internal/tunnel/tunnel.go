@@ -27,7 +27,7 @@ type Route struct {
 // credsFile as its credentials file, with one ingress rule per route in the
 // order given (cloudflared matches ingress rules top to bottom, first match
 // wins), followed by the mandatory catch-all rule. Callers are responsible
-// for including a route to oak's own API (e.g. "oak.<domain>" ->
+// for including a route to oak's own API (e.g. "oakberryio.<domain>" ->
 // "http://127.0.0.1:<api_port>") in routes if they want it reachable
 // remotely; Render itself only templates whatever routes it's given plus
 // the catch-all.

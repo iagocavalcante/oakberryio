@@ -23,6 +23,9 @@ import (
 //go:embed dashboard.html
 var dashboardHTML []byte
 
+//go:embed landing.html
+var landingHTML []byte
+
 // API wires oakd's HTTP surface: deploy, machine listing, logs, secrets,
 // volumes and app listing. The same Mux is served on both the trusted unix
 // socket and the bearer-token-guarded TCP listener; see daemon.go.
@@ -55,7 +58,17 @@ func (a *API) Mux() *http.ServeMux {
 	mux.HandleFunc("GET /apps", a.handleApps)
 	mux.HandleFunc("GET /metrics", a.handleMetrics)
 	mux.HandleFunc("GET /dashboard", a.handleDashboard)
+	mux.HandleFunc("GET /{$}", a.handleLanding)
 	return mux
+}
+
+// handleLanding serves the public project landing page at the root of the
+// tunneled host (oakberryio.<domain>/). Like /dashboard it carries no data
+// and is exempt from AuthMiddleware. "GET /{$}" matches only the exact root
+// path, so it never shadows the API routes above.
+func (a *API) handleLanding(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(landingHTML)
 }
 
 // AuthMiddleware wraps next with a bearer-token check against a.Token. It's
@@ -68,7 +81,7 @@ func (a *API) Mux() *http.ServeMux {
 // behind this same check.
 func (a *API) AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == "/dashboard" {
+		if r.Method == http.MethodGet && (r.URL.Path == "/dashboard" || r.URL.Path == "/") {
 			next.ServeHTTP(w, r)
 			return
 		}
