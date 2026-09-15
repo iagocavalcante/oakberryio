@@ -46,6 +46,9 @@ builds:
 archives:
   - id: default
     formats: [tar.gz]
+    # darwin archives carry just the oak CLI; linux archives also carry the
+    # server binaries (oakd, oak-init) — intentionally different counts.
+    allow_different_binary_count: true
     ids:
       - oak
       - oakd
