@@ -74,16 +74,23 @@ func (s *Server) resolveLocal(w dns.ResponseWriter, r *dns.Msg, q dns.Question) 
 	reply.SetReply(r)
 	reply.Authoritative = true
 
-	if q.Qtype != dns.TypeA {
+	app := strings.TrimSuffix(strings.ToLower(q.Name), zone)
+	ips := s.Resolve(app)
+	if len(ips) == 0 {
+		// The app genuinely doesn't exist: NXDOMAIN, for any query type.
 		reply.SetRcode(r, dns.RcodeNameError)
 		_ = w.WriteMsg(reply)
 		return
 	}
 
-	app := strings.TrimSuffix(strings.ToLower(q.Name), zone)
-	ips := s.Resolve(app)
-	if len(ips) == 0 {
-		reply.SetRcode(r, dns.RcodeNameError)
+	// The name exists. For any query other than A (e.g. the AAAA probe that
+	// resolvers like Erlang's inet_res -- Postgrex -- send as a matter of
+	// course), answer NOERROR with an empty answer section (NODATA), not
+	// NXDOMAIN: returning NXDOMAIN for a name that exists makes those
+	// resolvers conclude the host is unknown and give up, ignoring the A
+	// record that's right here. Only A carries data in this zone (guests are
+	// IPv4-only on oak0).
+	if q.Qtype != dns.TypeA {
 		_ = w.WriteMsg(reply)
 		return
 	}

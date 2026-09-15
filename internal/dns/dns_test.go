@@ -142,3 +142,32 @@ func TestMultipleQuestionsIsFormatError(t *testing.T) {
 		t.Fatalf("rcode = %v, want FormatError", resp.Rcode)
 	}
 }
+
+// TestExistingAppNonAIsNodata guards the fix for Erlang/BEAM resolvers
+// (Postgrex) that probe AAAA: a name that exists must answer NOERROR with an
+// empty answer section, not NXDOMAIN, or those resolvers conclude the host is
+// unknown and never use its A record.
+func TestExistingAppNonAIsNodata(t *testing.T) {
+	srv := &Server{Resolve: func(app string) []net.IP {
+		if app == "db" {
+			return []net.IP{net.ParseIP("10.200.0.7")}
+		}
+		return nil
+	}}
+	addr := startServer(t, srv)
+
+	c := new(dns.Client)
+	m := new(dns.Msg)
+	m.SetQuestion("db.internal.", dns.TypeAAAA)
+
+	resp, _, err := c.Exchange(m, addr)
+	if err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("rcode = %v, want NOERROR (NODATA)", dns.RcodeToString[resp.Rcode])
+	}
+	if len(resp.Answer) != 0 {
+		t.Fatalf("answer count = %d, want 0 (no AAAA in this zone)", len(resp.Answer))
+	}
+}
