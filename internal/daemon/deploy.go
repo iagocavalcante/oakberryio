@@ -74,6 +74,23 @@ func vsockSocketPath(socketDir, id string) string {
 	return filepath.Join(socketDir, id+"_vsock.sock")
 }
 
+// subnetForApp resolves app's tenant subnet index from its recorded owner
+// (apps.owner, set once at create time by SetAppOwner), allocating a new
+// subnet the first time that owner deploys anything. Every place that boots
+// a machine (bootFromRelease, runReleaseCommand, reconcileOne) calls this
+// so the same owner always lands on the same bridge.
+func (d *Deployer) subnetForApp(app string) (int, error) {
+	owner, err := d.Store.AppOwner(app)
+	if err != nil {
+		return 0, fmt.Errorf("app owner for %s: %w", app, err)
+	}
+	idx, err := d.Store.SubnetForOwner(owner)
+	if err != nil {
+		return 0, fmt.Errorf("subnet for owner of %s: %w", app, err)
+	}
+	return idx, nil
+}
+
 // releaseCmd is the JSON encoding written to the releases.cmd column: the
 // image's entrypoint and cmd kept as separate slices (rather than a single
 // concatenated one) so an empty entrypoint round-trips distinctly from an
@@ -115,6 +132,14 @@ type Deployer struct {
 
 	Kernel    string // defaults to /var/lib/oak/kernel/vmlinux, see kernel()
 	SocketDir string // defaults to <DataDir>/run, see socketDir()
+
+	// EnsureBridge idempotently ensures a tenant subnet's bridge (and its
+	// DNS listener) exist before a machine boots onto it, returning the
+	// bridge's name (e.g. "oak3") and gateway IP (e.g. "10.200.3.1"). Set
+	// by Daemon.New to a real netlink-backed implementation (linux only);
+	// tests that never boot a real machine through Deploy/Reconcile can
+	// leave it nil, and tests that do (see testDeployer) set a fake.
+	EnsureBridge func(idx int) (bridge, gateway string, err error)
 
 	Domain       string
 	TunnelID     string
@@ -280,7 +305,16 @@ func (d *Deployer) runReleaseCommand(ctx context.Context, cfg *appconfig.Config,
 	}
 	tap := "oak-" + id[:8]
 
-	ip, err := d.Store.AllocAndInsertMachine(id, cfg.App, rel.ID, tap)
+	idx, err := d.subnetForApp(cfg.App)
+	if err != nil {
+		return fmt.Errorf("release machine %s: %w", id, err)
+	}
+	bridge, gateway, err := d.EnsureBridge(idx)
+	if err != nil {
+		return fmt.Errorf("ensure bridge for release machine %s: %w", id, err)
+	}
+
+	ip, err := d.Store.AllocAndInsertMachine(id, cfg.App, rel.ID, tap, idx)
 	if err != nil {
 		return fmt.Errorf("alloc ip and insert release machine %s: %w", id, err)
 	}
@@ -312,9 +346,9 @@ func (d *Deployer) runReleaseCommand(ctx context.Context, cfg *appconfig.Config,
 	guest := mmds.Guest{
 		MachineID: id,
 		App:       cfg.App,
-		IP:        ip + "/16",
-		Gateway:   "10.200.0.1",
-		DNS:       "10.200.0.1",
+		IP:        ip + "/24",
+		Gateway:   gateway,
+		DNS:       gateway,
 		Env:       envMap,
 		// Run the release command through a shell instead of the image's own
 		// entrypoint/cmd, exactly like fly.toml's release_command, so
@@ -327,9 +361,10 @@ func (d *Deployer) runReleaseCommand(ctx context.Context, cfg *appconfig.Config,
 		Kernel:    d.kernel(),
 		RootFS:    rel.RootFS,
 		Tap:       tap,
+		Bridge:    bridge,
 		MAC:       mac,
-		IP:        ip + "/16",
-		Gateway:   "10.200.0.1",
+		IP:        ip + "/24",
+		Gateway:   gateway,
 		MemoryMB:  int64(cfg.VM.MemoryMB),
 		CPUs:      int64(cfg.VM.CPUs),
 		LogPath:   logPath,
@@ -432,7 +467,16 @@ func (d *Deployer) bootFromRelease(ctx context.Context, cfg *appconfig.Config, r
 	}
 	tap := "oak-" + id[:8]
 
-	ip, err := d.Store.AllocAndInsertMachine(id, cfg.App, rel.ID, tap)
+	idx, err := d.subnetForApp(cfg.App)
+	if err != nil {
+		return "", fmt.Errorf("machine %s: %w", id, err)
+	}
+	bridge, gateway, err := d.EnsureBridge(idx)
+	if err != nil {
+		return "", fmt.Errorf("ensure bridge for machine %s: %w", id, err)
+	}
+
+	ip, err := d.Store.AllocAndInsertMachine(id, cfg.App, rel.ID, tap, idx)
 	if err != nil {
 		return "", fmt.Errorf("alloc ip and insert machine %s: %w", id, err)
 	}
@@ -455,9 +499,9 @@ func (d *Deployer) bootFromRelease(ctx context.Context, cfg *appconfig.Config, r
 	guest := mmds.Guest{
 		MachineID:  id,
 		App:        cfg.App,
-		IP:         ip + "/16",
-		Gateway:    "10.200.0.1",
-		DNS:        "10.200.0.1",
+		IP:         ip + "/24",
+		Gateway:    gateway,
+		DNS:        gateway,
 		Env:        envMap,
 		Entrypoint: rc.Entrypoint,
 		Cmd:        rc.Cmd,
@@ -470,9 +514,10 @@ func (d *Deployer) bootFromRelease(ctx context.Context, cfg *appconfig.Config, r
 		RootFS:    rel.RootFS,
 		Volumes:   volSpecs,
 		Tap:       tap,
+		Bridge:    bridge,
 		MAC:       mac,
-		IP:        ip + "/16",
-		Gateway:   "10.200.0.1",
+		IP:        ip + "/24",
+		Gateway:   gateway,
 		MemoryMB:  int64(cfg.VM.MemoryMB),
 		CPUs:      int64(cfg.VM.CPUs),
 		LogPath:   logPath,

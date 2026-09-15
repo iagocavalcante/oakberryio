@@ -18,3 +18,6 @@ CREATE TABLE IF NOT EXISTS volumes (
 CREATE TABLE IF NOT EXISTS secrets (
   app TEXT NOT NULL, key TEXT NOT NULL, ciphertext BLOB NOT NULL,
   node_id TEXT NOT NULL DEFAULT 'local', PRIMARY KEY(app,key));
+CREATE TABLE IF NOT EXISTS tenant_subnets (
+  owner TEXT PRIMARY KEY, idx INTEGER NOT NULL UNIQUE);
+INSERT OR IGNORE INTO tenant_subnets(owner, idx) VALUES ('', 0);

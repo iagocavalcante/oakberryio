@@ -57,22 +57,43 @@ done
 
 # nftables: Docker manages its own nftables/iptables state (including a
 # FORWARD DROP policy), so this must not `flush ruleset` -- that would wipe
-# Docker's rules on every idempotent re-run -- and oak0's forwarded traffic
+# Docker's rules on every idempotent re-run -- and oak*'s forwarded traffic
 # needs its own explicit accept since Docker's DROP policy would otherwise
 # catch it too. oak's rules live in their own table/file, included from
 # /etc/nftables.conf rather than replacing it.
+#
+# The ruleset is static and generic across every tenant bridge (oak0, oak1,
+# ...  oakN): only bridges are created dynamically (oakd's ensureBridge, see
+# docs/plans/2026-09-15-phase-d-network-isolation-design.md), so nftables
+# never needs rewriting per tenant.
+#   - forward: same-bridge (intra-tenant) traffic is switched at L2 and
+#     never reaches this chain, so "oak* -> oak*" here only ever matches
+#     *cross*-bridge traffic -- i.e. cross-tenant -- which is dropped. This
+#     also drops admin<->tenant over the network, which is intentional: the
+#     admin manages tenants via the control plane, not by dialing their VMs.
+#   - postrouting: masquerade any tenant subnet's traffic that isn't itself
+#     staying within an oak* bridge, so tenant->internet egress still works.
+#   - input: each bridge's gateway runs its own DNS listener (a tenant's
+#     nameserver is its own gateway; cross-subnet DNS would be dropped by
+#     the forward rule above like any other cross-tenant traffic), so
+#     tenants need to reach port 53 on their own gateway.
 mkdir -p /etc/nftables.d
 cat >/etc/nftables.d/oak.nft <<'N'
 table ip oak {
   chain forward {
     type filter hook forward priority -10;
-    iifname "oak0" accept
-    oifname "oak0" ct state related,established accept
-    oifname "oak0" accept
+    oifname "oak*" ct state related,established accept
+    iifname "oak*" oifname "oak*" drop
+    iifname "oak*" accept
   }
   chain postrouting {
     type nat hook postrouting priority 100;
-    oifname != "oak0" ip saddr 10.200.0.0/16 masquerade
+    oifname != "oak*" ip saddr 10.200.0.0/16 masquerade
+  }
+  chain input {
+    type filter hook input priority -10;
+    iifname "oak*" udp dport 53 accept
+    iifname "oak*" tcp dport 53 accept
   }
 }
 N
@@ -98,17 +119,29 @@ echo 'net.ipv4.ip_forward=1' >/etc/sysctl.d/99-oak.conf
 # without deploy/ necessarily alongside it) applies it via idempotent
 # `iptables -C ... || iptables -I ...` checks, After/Requires=docker.service
 # so it runs whenever docker does.
+#
+# The rules mirror the oak table's forward chain above (oak*'s cross-tenant
+# drop, then its accept) using iptables' "+" interface wildcard for the
+# same oak0/oak1/.../oakN generality. In practice the cross-tenant drop
+# here is unreachable -- the "ip oak" table above hooks at a lower priority
+# (-10) than Docker's own filter table (0), so a cross-tenant packet is
+# already dropped before it ever reaches DOCKER-USER -- but it's kept as
+# defense-in-depth so this chain's own policy doesn't depend on that
+# ordering. ExecStart order matters: iptables -I inserts at the top of the
+# chain each time, so these run in reverse of the desired final order
+# (drop on top, then the two accepts).
 cat >/etc/systemd/system/oak-docker-forward.service <<'N'
 [Unit]
-Description=allow oak0 traffic through Docker's DOCKER-USER chain
+Description=allow oak* traffic through Docker's DOCKER-USER chain
 After=docker.service
 Requires=docker.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/sh -c 'iptables -C DOCKER-USER -i oak0 -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER -i oak0 -j ACCEPT'
-ExecStart=/bin/sh -c 'iptables -C DOCKER-USER -o oak0 -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER -o oak0 -j ACCEPT'
+ExecStart=/bin/sh -c 'iptables -C DOCKER-USER -o oak+ -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER -o oak+ -j ACCEPT'
+ExecStart=/bin/sh -c 'iptables -C DOCKER-USER -i oak+ -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER -i oak+ -j ACCEPT'
+ExecStart=/bin/sh -c 'iptables -C DOCKER-USER -i oak+ -o oak+ -j DROP 2>/dev/null || iptables -I DOCKER-USER -i oak+ -o oak+ -j DROP'
 
 [Install]
 WantedBy=multi-user.target

@@ -207,19 +207,31 @@ func (s *Store) InsertRelease(app, image, rootfs, cmdJSON, envJSON, workdir stri
 	return id, nil
 }
 
-const (
-	ipamBase    = "10.200.0.0"
-	ipamMaxHost = 0xFFFF // /16: host part is 16 bits
-)
+// ipamMaxHost is the top of a /24's usable host range: .2-.254 (.1 is the
+// gateway, .0/.255 are network/broadcast).
+const ipamMaxHost = 254
 
-// AllocIP returns the smallest free host address in 10.200.0.0/16, starting
-// at 10.200.0.2 (10.200.0.1 is reserved for the gateway).
+// tenantSubnetMax is the largest tenant subnet index SubnetForOwner will
+// hand out: idx 0 is the admin/legacy subnet (seeded in schema.sql), so
+// 1..255 leaves 255 tenants -- a bridge name "oak255" is still well within
+// the 15-char Linux ifname limit. Ample for a homelab; see the design doc.
+const tenantSubnetMax = 255
+
+// subnetBase returns the dotted-quad base address of tenant subnet idx's
+// /24, e.g. idx 3 -> "10.200.3.0".
+func subnetBase(idx int) string {
+	return fmt.Sprintf("10.200.%d.0", idx)
+}
+
+// AllocIP returns the smallest free host address in the admin subnet
+// (10.200.0.0/24), starting at 10.200.0.2 (10.200.0.1 is reserved for the
+// gateway).
 //
 // ponytail: O(n) scan over allocated machine IPs on every call; fine up to
 // tens of thousands of machines, revisit with a free-list if it shows up in
 // profiles.
 func (s *Store) AllocIP() (string, error) {
-	return allocIP(s.db)
+	return allocIP(s.db, 0)
 }
 
 // dbExecer is satisfied by both *sql.DB and *sql.Tx, so allocIP and
@@ -231,12 +243,21 @@ type dbExecer interface {
 	Query(query string, args ...any) (*sql.Rows, error)
 }
 
-func allocIP(db dbExecer) (string, error) {
+// allocIP returns the smallest free host address in tenant subnet idx's
+// /24 (10.200.<idx>.0/24), scanning every allocated machine IP but only
+// treating the ones inside that /24 as used -- so each tenant's IPAM is
+// independent of every other tenant's.
+func allocIP(db dbExecer, idx int) (string, error) {
 	rows, err := db.Query(`SELECT ip FROM machines`)
 	if err != nil {
 		return "", fmt.Errorf("query allocated ips: %w", err)
 	}
 	defer rows.Close()
+
+	base, err := ipToUint32(subnetBase(idx))
+	if err != nil {
+		return "", fmt.Errorf("parse subnet base for idx %d: %w", idx, err)
+	}
 
 	used := make(map[uint32]bool)
 	for rows.Next() {
@@ -248,23 +269,109 @@ func allocIP(db dbExecer) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("parse allocated ip %q: %w", ip, err)
 		}
-		used[addr] = true
+		if addr&0xFFFFFF00 == base {
+			used[addr] = true
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return "", fmt.Errorf("iterate allocated ips: %w", err)
 	}
 
-	base, err := ipToUint32(ipamBase)
-	if err != nil {
-		return "", fmt.Errorf("parse ipam base: %w", err)
-	}
 	for host := uint32(2); host <= ipamMaxHost; host++ {
 		candidate := base | host
 		if !used[candidate] {
 			return uint32ToIP(candidate), nil
 		}
 	}
-	return "", fmt.Errorf("no free ip in %s/16", ipamBase)
+	return "", fmt.Errorf("no free ip in %s/24", subnetBase(idx))
+}
+
+// SubnetForOwner returns owner's tenant subnet index, allocating the
+// smallest free index >= 1 the first time owner is seen. The admin/legacy
+// owner "" is seeded at idx 0 by schema.sql, so this is only ever called
+// with a non-"" owner in practice, but works uniformly for any owner.
+//
+// The lookup-or-allocate is one BEGIN/COMMIT transaction so a concurrent
+// call for a different new owner can never observe the
+// allocated-but-not-yet-inserted gap and hand out the same index twice --
+// same reasoning as AllocAndInsertMachine, and likewise relying on Store's
+// single underlying connection (SetMaxOpenConns(1) in Open) to make plain
+// sequential Exec/Query calls between Begin and Commit correct here.
+func (s *Store) SubnetForOwner(owner string) (int, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("begin subnet for owner %q: %w", owner, err)
+	}
+	defer tx.Rollback() // no-op once Commit has succeeded
+
+	var idx int
+	err = tx.QueryRow(`SELECT idx FROM tenant_subnets WHERE owner = ?`, owner).Scan(&idx)
+	if err == nil {
+		return idx, tx.Commit()
+	}
+	if err != sql.ErrNoRows {
+		return 0, fmt.Errorf("lookup subnet for owner %q: %w", owner, err)
+	}
+
+	idx, err = smallestFreeSubnetIdx(tx)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(`INSERT INTO tenant_subnets(owner, idx) VALUES (?, ?)`, owner, idx); err != nil {
+		return 0, fmt.Errorf("insert subnet for owner %q: %w", owner, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit subnet for owner %q: %w", owner, err)
+	}
+	return idx, nil
+}
+
+// smallestFreeSubnetIdx scans tenant_subnets for the smallest unused index
+// in [1, tenantSubnetMax].
+//
+// ponytail: O(n) scan, same tradeoff as allocIP -- fine for the handful of
+// tenant subnets this design supports.
+func smallestFreeSubnetIdx(db dbExecer) (int, error) {
+	rows, err := db.Query(`SELECT idx FROM tenant_subnets`)
+	if err != nil {
+		return 0, fmt.Errorf("query tenant subnets: %w", err)
+	}
+	defer rows.Close()
+
+	used := make(map[int]bool)
+	for rows.Next() {
+		var idx int
+		if err := rows.Scan(&idx); err != nil {
+			return 0, fmt.Errorf("scan tenant subnet: %w", err)
+		}
+		used[idx] = true
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate tenant subnets: %w", err)
+	}
+
+	for idx := 1; idx <= tenantSubnetMax; idx++ {
+		if !used[idx] {
+			return idx, nil
+		}
+	}
+	return 0, fmt.Errorf("no free tenant subnet (max %d)", tenantSubnetMax)
+}
+
+// OwnerForSubnet returns the owner tenant subnet idx belongs to -- the
+// reverse of SubnetForOwner. Used by the DNS resolver to translate a
+// query's source IP (whose third octet is the tenant subnet index) into
+// the tenant it belongs to.
+func (s *Store) OwnerForSubnet(idx int) (string, error) {
+	var owner string
+	err := s.db.QueryRow(`SELECT owner FROM tenant_subnets WHERE idx = ?`, idx).Scan(&owner)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", fmt.Errorf("tenant subnet %d: not found", idx)
+		}
+		return "", fmt.Errorf("owner for tenant subnet %d: %w", idx, err)
+	}
+	return owner, nil
 }
 
 func ipToUint32(s string) (uint32, error) {
@@ -314,22 +421,22 @@ func insertMachine(db dbExecer, id, app string, releaseID int64, ip, tap string)
 	return nil
 }
 
-// AllocAndInsertMachine allocates a free IP and inserts the new machine row
-// (state "starting") in one BEGIN IMMEDIATE/COMMIT transaction, so a
-// concurrent AllocIP can never observe the allocated-but-not-yet-inserted
-// gap between the two calls and hand out the same address twice. Store
-// already serializes all access through a single *sql.DB connection
-// (SetMaxOpenConns(1) in Open), so plain sequential Exec/Query calls between
-// BEGIN IMMEDIATE and COMMIT are correct here, matching the rest of this
-// file's non-transactional style.
-func (s *Store) AllocAndInsertMachine(id, app string, releaseID int64, tap string) (string, error) {
+// AllocAndInsertMachine allocates a free IP in tenant subnet idx and
+// inserts the new machine row (state "starting") in one BEGIN
+// IMMEDIATE/COMMIT transaction, so a concurrent AllocIP can never observe
+// the allocated-but-not-yet-inserted gap between the two calls and hand out
+// the same address twice. Store already serializes all access through a
+// single *sql.DB connection (SetMaxOpenConns(1) in Open), so plain
+// sequential Exec/Query calls between BEGIN IMMEDIATE and COMMIT are
+// correct here, matching the rest of this file's non-transactional style.
+func (s *Store) AllocAndInsertMachine(id, app string, releaseID int64, tap string, idx int) (string, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return "", fmt.Errorf("begin alloc+insert machine %s: %w", id, err)
 	}
 	defer tx.Rollback() // no-op once Commit has succeeded
 
-	ip, err := allocIP(tx)
+	ip, err := allocIP(tx, idx)
 	if err != nil {
 		return "", err
 	}

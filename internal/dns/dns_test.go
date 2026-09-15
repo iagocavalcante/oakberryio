@@ -25,7 +25,7 @@ func startServer(t *testing.T, srv *Server) string {
 func TestResolvesInternalApp(t *testing.T) {
 	want := net.ParseIP("10.200.0.7")
 	srv := &Server{
-		Resolve: func(app string) []net.IP {
+		Resolve: func(app string, _ net.IP) []net.IP {
 			if app == "hello" {
 				return []net.IP{want}
 			}
@@ -58,7 +58,7 @@ func TestResolvesInternalApp(t *testing.T) {
 }
 
 func TestUnknownAppIsNXDOMAIN(t *testing.T) {
-	srv := &Server{Resolve: func(app string) []net.IP { return nil }}
+	srv := &Server{Resolve: func(app string, _ net.IP) []net.IP { return nil }}
 	addr := startServer(t, srv)
 
 	c := new(dns.Client)
@@ -95,7 +95,7 @@ func TestOtherZonesForwardUpstream(t *testing.T) {
 	}))
 
 	srv := &Server{
-		Resolve:  func(app string) []net.IP { return nil },
+		Resolve:  func(app string, _ net.IP) []net.IP { return nil },
 		Upstream: upstreamAddr,
 	}
 	addr := startServer(t, srv)
@@ -124,7 +124,7 @@ func TestOtherZonesForwardUpstream(t *testing.T) {
 }
 
 func TestMultipleQuestionsIsFormatError(t *testing.T) {
-	srv := &Server{Resolve: func(app string) []net.IP { return nil }}
+	srv := &Server{Resolve: func(app string, _ net.IP) []net.IP { return nil }}
 	addr := startServer(t, srv)
 
 	c := new(dns.Client)
@@ -143,12 +143,36 @@ func TestMultipleQuestionsIsFormatError(t *testing.T) {
 	}
 }
 
+// TestResolvePassesRequesterSourceIP confirms resolveLocal threads the
+// query's actual UDP source IP through to Resolve (via requesterIP), which
+// is what lets a daemon-level Resolve scope its answer to the tenant
+// subnet a query arrived from.
+func TestResolvePassesRequesterSourceIP(t *testing.T) {
+	var gotSrcIP net.IP
+	srv := &Server{Resolve: func(app string, srcIP net.IP) []net.IP {
+		gotSrcIP = srcIP
+		return []net.IP{net.ParseIP("10.200.0.7")}
+	}}
+	addr := startServer(t, srv)
+
+	c := new(dns.Client)
+	m := new(dns.Msg)
+	m.SetQuestion("hello.internal.", dns.TypeA)
+	if _, _, err := c.Exchange(m, addr); err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+
+	if gotSrcIP == nil || !gotSrcIP.Equal(net.ParseIP("127.0.0.1")) {
+		t.Fatalf("srcIP = %v, want 127.0.0.1 (the test client's loopback address)", gotSrcIP)
+	}
+}
+
 // TestExistingAppNonAIsNodata guards the fix for Erlang/BEAM resolvers
 // (Postgrex) that probe AAAA: a name that exists must answer NOERROR with an
 // empty answer section, not NXDOMAIN, or those resolvers conclude the host is
 // unknown and never use its A record.
 func TestExistingAppNonAIsNodata(t *testing.T) {
-	srv := &Server{Resolve: func(app string) []net.IP {
+	srv := &Server{Resolve: func(app string, _ net.IP) []net.IP {
 		if app == "db" {
 			return []net.IP{net.ParseIP("10.200.0.7")}
 		}

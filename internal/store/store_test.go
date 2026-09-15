@@ -88,7 +88,7 @@ func TestAllocAndInsertMachineAllocatesAndInsertsAtomically(t *testing.T) {
 		t.Fatalf("insert release: %v", err)
 	}
 
-	ip1, err := s.AllocAndInsertMachine("m1", "a", relID, "tap-m1")
+	ip1, err := s.AllocAndInsertMachine("m1", "a", relID, "tap-m1", 0)
 	if err != nil {
 		t.Fatalf("alloc and insert machine: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestAllocAndInsertMachineAllocatesAndInsertsAtomically(t *testing.T) {
 		t.Fatalf("machines = %+v, want one row m1/%s", machines, ip1)
 	}
 
-	ip2, err := s.AllocAndInsertMachine("m2", "a", relID, "tap-m2")
+	ip2, err := s.AllocAndInsertMachine("m2", "a", relID, "tap-m2", 0)
 	if err != nil {
 		t.Fatalf("alloc and insert machine 2: %v", err)
 	}
@@ -428,7 +428,7 @@ func TestFullCascadeDeleteLeavesNoOrphans(t *testing.T) {
 		if err != nil {
 			t.Fatalf("insert release for %s: %v", app, err)
 		}
-		if _, err := s.AllocAndInsertMachine(app+"-m1", app, relID, "tap-"+app); err != nil {
+		if _, err := s.AllocAndInsertMachine(app+"-m1", app, relID, "tap-"+app, 0); err != nil {
 			t.Fatalf("insert machine for %s: %v", app, err)
 		}
 		if err := s.SetMachineState(app+"-m1", "running", 111); err != nil {
@@ -608,5 +608,106 @@ func TestOpenTwiceIsIdempotent(t *testing.T) {
 	t.Cleanup(func() { s2.Close() })
 	if owner, err := s2.AppOwner("a"); err != nil || owner != "" {
 		t.Fatalf("owner after reopen = %q, err %v, want \"\"", owner, err)
+	}
+}
+
+// TestAdminSubnetSeeded confirms schema.sql's seed row is visible through
+// OwnerForSubnet on a fresh store, without any explicit migration step.
+func TestAdminSubnetSeeded(t *testing.T) {
+	s := openTemp(t)
+	owner, err := s.OwnerForSubnet(0)
+	if err != nil {
+		t.Fatalf("owner for subnet 0: %v", err)
+	}
+	if owner != "" {
+		t.Fatalf("owner for subnet 0 = %q, want \"\" (admin/legacy)", owner)
+	}
+}
+
+// TestSubnetForOwnerAllocatesAndIsStable covers SubnetForOwner's
+// get-or-allocate contract: a new owner gets the smallest free index >= 1,
+// a repeat call for the same owner returns that same index, and a second
+// new owner gets a different one. OwnerForSubnet must round-trip each.
+func TestSubnetForOwnerAllocatesAndIsStable(t *testing.T) {
+	s := openTemp(t)
+
+	idx1, err := s.SubnetForOwner("alice")
+	if err != nil {
+		t.Fatalf("subnet for alice: %v", err)
+	}
+	if idx1 != 1 {
+		t.Fatalf("idx1 = %d, want 1 (0 is reserved for admin)", idx1)
+	}
+
+	idx1Again, err := s.SubnetForOwner("alice")
+	if err != nil {
+		t.Fatalf("subnet for alice (2nd): %v", err)
+	}
+	if idx1Again != idx1 {
+		t.Fatalf("idx1Again = %d, want stable %d", idx1Again, idx1)
+	}
+
+	idx2, err := s.SubnetForOwner("bob")
+	if err != nil {
+		t.Fatalf("subnet for bob: %v", err)
+	}
+	if idx2 == idx1 || idx2 != 2 {
+		t.Fatalf("idx2 = %d, want 2 and distinct from alice's %d", idx2, idx1)
+	}
+
+	if owner, err := s.OwnerForSubnet(idx1); err != nil || owner != "alice" {
+		t.Fatalf("owner for subnet %d = %q, err %v, want alice", idx1, owner, err)
+	}
+	if owner, err := s.OwnerForSubnet(idx2); err != nil || owner != "bob" {
+		t.Fatalf("owner for subnet %d = %q, err %v, want bob", idx2, owner, err)
+	}
+	if _, err := s.OwnerForSubnet(99); err == nil {
+		t.Fatal("owner for unallocated subnet 99: want error, got nil")
+	}
+}
+
+// TestAllocIPIsScopedPerSubnet confirms allocIP (via AllocAndInsertMachine)
+// only looks at machines within the target tenant subnet's /24: two
+// tenants each get their own 10.200.<idx>.2 rather than one blocking the
+// other's IPAM.
+func TestAllocIPIsScopedPerSubnet(t *testing.T) {
+	s := openTemp(t)
+	if err := s.UpsertApp("a", "{}"); err != nil {
+		t.Fatalf("upsert app a: %v", err)
+	}
+	if err := s.UpsertApp("b", "{}"); err != nil {
+		t.Fatalf("upsert app b: %v", err)
+	}
+	relA, err := s.InsertRelease("a", "img:1", "/rootfs/a-1.ext4", `[]`, `{}`, "/")
+	if err != nil {
+		t.Fatalf("insert release a: %v", err)
+	}
+	relB, err := s.InsertRelease("b", "img:1", "/rootfs/b-1.ext4", `[]`, `{}`, "/")
+	if err != nil {
+		t.Fatalf("insert release b: %v", err)
+	}
+
+	ipA1, err := s.AllocAndInsertMachine("a-m1", "a", relA, "tap-a1", 1)
+	if err != nil {
+		t.Fatalf("alloc+insert a-m1: %v", err)
+	}
+	if ipA1 != "10.200.1.2" {
+		t.Fatalf("ipA1 = %q, want 10.200.1.2", ipA1)
+	}
+
+	ipB1, err := s.AllocAndInsertMachine("b-m1", "b", relB, "tap-b1", 2)
+	if err != nil {
+		t.Fatalf("alloc+insert b-m1: %v", err)
+	}
+	if ipB1 != "10.200.2.2" {
+		t.Fatalf("ipB1 = %q, want 10.200.2.2 (independent of tenant 1's IPAM)", ipB1)
+	}
+
+	ipA2, err := s.AllocAndInsertMachine("a-m2", "a", relA, "tap-a2", 1)
+	if err != nil {
+		t.Fatalf("alloc+insert a-m2: %v", err)
+	}
+	if ipA2 != "10.200.1.3" {
+		t.Fatalf("ipA2 = %q, want 10.200.1.3 (next free in tenant 1's /24)", ipA2)
 	}
 }

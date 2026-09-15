@@ -19,9 +19,17 @@ OAK_DOMAIN=apps.example.com ./scripts/host-setup.sh
 ```
 
 This is idempotent — safe to re-run. It installs Firecracker, the guest
-kernel, the `oak0` bridge (`10.200.0.1/16`), nftables NAT/forwarding, a local
-Docker registry on `127.0.0.1:5000`, `cloudflared`, and generates an `age`
-key at `/etc/oak/key` for secrets encryption.
+kernel, the admin bridge `oak0` (`10.200.0.1`), nftables NAT/forwarding with
+per-tenant isolation, a local Docker registry on `127.0.0.1:5000`,
+`cloudflared`, and generates an `age` key at `/etc/oak/key` for secrets
+encryption.
+
+Networking is split per tenant: each owner gets its own `/24` and bridge
+`oak<idx>` (`10.200.<idx>.0/24`, gateway `10.200.<idx>.1`), created by oakd on
+demand; owner-less/admin apps stay on `oak0` (idx 0, `10.200.0.0/24`). The
+generic `oak*` nftables ruleset drops cross-tenant traffic while allowing
+intra-tenant and internet egress, and DNS answers are scoped to the requester's
+own tenant. See `docs/plans/2026-09-15-phase-d-network-isolation-design.md`.
 
 ## 3. Authenticate and create the Cloudflare Tunnel
 

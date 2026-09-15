@@ -1,13 +1,14 @@
 [Unit]
-Description=allow oak0 traffic through Docker's DOCKER-USER chain
+Description=allow oak* traffic through Docker's DOCKER-USER chain
 After=docker.service
 Requires=docker.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/sh -c 'iptables -C DOCKER-USER -i oak0 -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER -i oak0 -j ACCEPT'
-ExecStart=/bin/sh -c 'iptables -C DOCKER-USER -o oak0 -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER -o oak0 -j ACCEPT'
+ExecStart=/bin/sh -c 'iptables -C DOCKER-USER -o oak+ -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER -o oak+ -j ACCEPT'
+ExecStart=/bin/sh -c 'iptables -C DOCKER-USER -i oak+ -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER -i oak+ -j ACCEPT'
+ExecStart=/bin/sh -c 'iptables -C DOCKER-USER -i oak+ -o oak+ -j DROP 2>/dev/null || iptables -I DOCKER-USER -i oak+ -o oak+ -j DROP'
 
 [Install]
 WantedBy=multi-user.target

@@ -26,9 +26,14 @@ type Server struct {
 	// Addr is the address to listen on, e.g. "10.200.0.1:53".
 	Addr string
 
-	// Resolve returns the current IPs for app, or nil if the app doesn't
-	// exist (which the server turns into NXDOMAIN).
-	Resolve func(app string) []net.IP
+	// Resolve returns the current IPs for app as seen by a requester at
+	// srcIP, or nil if the app doesn't exist (which the server turns into
+	// NXDOMAIN) or if srcIP isn't allowed to see it -- deliberately the
+	// same outcome, so an app that exists but isn't the requester's doesn't
+	// leak its existence. srcIP is the query's UDP source address (see
+	// resolveLocal), letting a per-tenant Resolve implementation scope
+	// answers to the tenant subnet the query arrived from.
+	Resolve func(app string, srcIP net.IP) []net.IP
 
 	// Upstream is the DNS server non-.internal queries are forwarded to.
 	// Defaults to 1.1.1.1:53 when empty.
@@ -75,7 +80,7 @@ func (s *Server) resolveLocal(w dns.ResponseWriter, r *dns.Msg, q dns.Question) 
 	reply.Authoritative = true
 
 	app := strings.TrimSuffix(strings.ToLower(q.Name), zone)
-	ips := s.Resolve(app)
+	ips := s.Resolve(app, requesterIP(w))
 	if len(ips) == 0 {
 		// The app genuinely doesn't exist: NXDOMAIN, for any query type.
 		reply.SetRcode(r, dns.RcodeNameError)
@@ -102,6 +107,19 @@ func (s *Server) resolveLocal(w dns.ResponseWriter, r *dns.Msg, q dns.Question) 
 		})
 	}
 	_ = w.WriteMsg(reply)
+}
+
+// requesterIP extracts the UDP client's source IP from w.RemoteAddr(), for
+// Resolve to scope its answer to the tenant subnet the query arrived from.
+// Returns nil if RemoteAddr can't be parsed as host:port (shouldn't happen
+// for a UDP server, but Resolve implementations must tolerate nil rather
+// than the server panicking on it).
+func requesterIP(w dns.ResponseWriter) net.IP {
+	host, _, err := net.SplitHostPort(w.RemoteAddr().String())
+	if err != nil {
+		return nil
+	}
+	return net.ParseIP(host)
 }
 
 func (s *Server) forward(w dns.ResponseWriter, r *dns.Msg) {

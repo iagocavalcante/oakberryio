@@ -93,7 +93,7 @@ func insertRunningMachine(t *testing.T, d *Deployer, app string, pid int) string
 		t.Fatalf("insert release: %v", err)
 	}
 	id := app + "-m1"
-	if _, err := d.Store.AllocAndInsertMachine(id, app, releaseID, "oak-"+id); err != nil {
+	if _, err := d.Store.AllocAndInsertMachine(id, app, releaseID, "oak-"+id, 0); err != nil {
 		t.Fatalf("alloc and insert machine: %v", err)
 	}
 	if err := d.Store.SetMachineState(id, "running", pid); err != nil {

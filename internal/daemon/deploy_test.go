@@ -167,12 +167,20 @@ func openTestStore(t *testing.T) *store.Store {
 func testDeployer(t *testing.T, rt Runtime, chk Checker) *Deployer {
 	t.Helper()
 	return &Deployer{
-		Store:   openTestStore(t),
-		Runtime: rt,
-		Checker: chk,
-		DataDir: t.TempDir(),
-		LogDir:  t.TempDir(),
+		Store:        openTestStore(t),
+		Runtime:      rt,
+		Checker:      chk,
+		DataDir:      t.TempDir(),
+		LogDir:       t.TempDir(),
+		EnsureBridge: fakeEnsureBridge,
 	}
+}
+
+// fakeEnsureBridge stands in for the real netlink-backed
+// Daemon.ensureBridge in tests: it never touches the network, just returns
+// the bridge name/gateway idx would get in production.
+func fakeEnsureBridge(idx int) (bridge, gateway string, err error) {
+	return fmt.Sprintf("oak%d", idx), fmt.Sprintf("10.200.%d.1", idx), nil
 }
 
 func baseConfig(app string) *appconfig.Config {
@@ -930,7 +938,7 @@ func TestReconcileDoesNotRunReleaseCommand(t *testing.T) {
 	}
 
 	id := "abcdef012345"
-	if _, err := deployer.Store.AllocAndInsertMachine(id, cfg.App, releaseID, "oak-abcdef01"); err != nil {
+	if _, err := deployer.Store.AllocAndInsertMachine(id, cfg.App, releaseID, "oak-abcdef01", 0); err != nil {
 		t.Fatalf("alloc and insert machine: %v", err)
 	}
 	if err := deployer.Store.SetMachineState(id, "running", 1234); err != nil {

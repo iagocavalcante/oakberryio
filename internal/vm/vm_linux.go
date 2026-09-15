@@ -31,11 +31,11 @@ type Machine struct {
 	pid int
 }
 
-// Start creates spec.Tap on bridge oak0, boots a Firecracker microVM per
+// Start creates spec.Tap on spec.Bridge, boots a Firecracker microVM per
 // spec, and pushes meta into its MMDS before the guest starts running. On
 // any error after the tap is created, the tap is deleted.
 func Start(ctx context.Context, spec Spec, meta mmds.Guest) (*Machine, error) {
-	tap, err := createTap(spec.Tap)
+	tap, err := createTap(spec.Tap, spec.Bridge)
 	if err != nil {
 		return nil, fmt.Errorf("vm: create tap %s: %w", spec.Tap, err)
 	}
@@ -48,7 +48,17 @@ func Start(ctx context.Context, spec Spec, meta mmds.Guest) (*Machine, error) {
 	return m, nil
 }
 
-func createTap(name string) (netlink.Link, error) {
+// createTap creates a tap device named name and attaches it to bridge. An
+// empty bridge falls back to "oak0" (the admin/legacy tenant subnet's
+// bridge, also the only one that ever existed before per-tenant subnets) --
+// a safety net for any caller that forgets to set Spec.Bridge, not the
+// primary way callers pick a bridge; every real caller in this codebase
+// sets it explicitly from the machine's resolved tenant subnet.
+func createTap(name, bridge string) (netlink.Link, error) {
+	if bridge == "" {
+		bridge = "oak0"
+	}
+
 	attrs := netlink.NewLinkAttrs()
 	attrs.Name = name
 	tap := &netlink.Tuntap{LinkAttrs: attrs, Mode: netlink.TUNTAP_MODE_TAP}
@@ -67,14 +77,14 @@ func createTap(name string) (netlink.Link, error) {
 		}
 	}
 
-	bridge, err := netlink.LinkByName("oak0")
+	br, err := netlink.LinkByName(bridge)
 	if err != nil {
 		_ = netlink.LinkDel(tap)
-		return nil, fmt.Errorf("bridge oak0: %w", err)
+		return nil, fmt.Errorf("bridge %s: %w", bridge, err)
 	}
-	if err := netlink.LinkSetMaster(tap, bridge); err != nil {
+	if err := netlink.LinkSetMaster(tap, br); err != nil {
 		_ = netlink.LinkDel(tap)
-		return nil, fmt.Errorf("set master oak0: %w", err)
+		return nil, fmt.Errorf("set master %s: %w", bridge, err)
 	}
 	if err := netlink.LinkSetUp(tap); err != nil {
 		_ = netlink.LinkDel(tap)

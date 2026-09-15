@@ -15,7 +15,6 @@ import (
 	"filippo.io/age"
 
 	"github.com/iagocavalcante/oakberryio/internal/appconfig"
-	"github.com/iagocavalcante/oakberryio/internal/dns"
 	"github.com/iagocavalcante/oakberryio/internal/metrics"
 	"github.com/iagocavalcante/oakberryio/internal/mmds"
 	"github.com/iagocavalcante/oakberryio/internal/secrets"
@@ -111,7 +110,6 @@ type Daemon struct {
 	cfg      Config
 	Store    *store.Store
 	Deployer *Deployer
-	DNS      *dns.Server
 	API      *API
 
 	// sampler computes host/VM resource-usage snapshots; see Run's metrics
@@ -119,6 +117,17 @@ type Daemon struct {
 	// reads.
 	sampler       *metrics.Sampler
 	metricsHolder *metricsHolder
+
+	// bridgeMu serializes ensureBridge end to end (netlink bridge setup plus
+	// starting a tenant subnet's first DNS listener) across concurrent
+	// Deploy/Reconcile calls that might land on the same, or a brand new,
+	// tenant subnet at the same time.
+	bridgeMu sync.Mutex
+	// dnsListening tracks which tenant subnet indexes already have a DNS
+	// listener running, so ensureBridge starts each one exactly once (see
+	// its doc comment: every bridge needs its own listener bound to its own
+	// gateway IP).
+	dnsListening map[int]bool
 }
 
 // New opens the store, loads the age identity (if KeyFile is set), and
@@ -179,38 +188,25 @@ func New(ctx context.Context, cfg Config) (*Daemon, error) {
 		return nil, fmt.Errorf("mkdir socket dir %s: %w", deployer.socketDir(), err)
 	}
 
-	dnsServer := &dns.Server{
-		Addr: "10.200.0.1:53",
-		Resolve: func(app string) []net.IP {
-			machines, err := st.MachinesForApp(app)
-			if err != nil {
-				return nil
-			}
-			var ips []net.IP
-			for _, m := range machines {
-				if m.State != "running" {
-					continue
-				}
-				if ip := net.ParseIP(m.IP); ip != nil {
-					ips = append(ips, ip)
-				}
-			}
-			return ips
-		},
-	}
-
 	mh := &metricsHolder{}
 	api := &API{Deployer: deployer, Store: st, Token: cfg.APIToken, Metrics: mh}
 
-	return &Daemon{
+	d := &Daemon{
 		cfg:           cfg,
 		Store:         st,
 		Deployer:      deployer,
-		DNS:           dnsServer,
 		API:           api,
 		sampler:       metrics.NewSampler(cfg.DataDir),
 		metricsHolder: mh,
-	}, nil
+	}
+	// deployer.EnsureBridge closes over d itself (built above) rather than
+	// being inlined into the Deployer literal, since ensureBridge is a
+	// Daemon method: bridge lifecycle and the DNS listeners it starts both
+	// need Daemon-level state (bridgeMu/dnsListening, the shared resolver
+	// over d.Store) that Deployer has no reason to own.
+	deployer.EnsureBridge = d.ensureBridge
+
+	return d, nil
 }
 
 // Reconcile re-starts every machine the store thinks is running. A daemon
@@ -266,6 +262,15 @@ func (d *Daemon) reconcileOne(ctx context.Context, m store.Machine) error {
 		return fmt.Errorf("mac from ip %s: %w", m.IP, err)
 	}
 
+	idx, err := d.Deployer.subnetForApp(m.App)
+	if err != nil {
+		return fmt.Errorf("subnet for machine %s: %w", m.ID, err)
+	}
+	bridge, gateway, err := d.Deployer.EnsureBridge(idx)
+	if err != nil {
+		return fmt.Errorf("ensure bridge for machine %s: %w", m.ID, err)
+	}
+
 	logDir := filepath.Join(d.Deployer.LogDir, m.App)
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		return fmt.Errorf("mkdir log dir %s: %w", logDir, err)
@@ -277,9 +282,10 @@ func (d *Daemon) reconcileOne(ctx context.Context, m store.Machine) error {
 		RootFS:    rel.RootFS,
 		Volumes:   volSpecs,
 		Tap:       m.Tap,
+		Bridge:    bridge,
 		MAC:       mac,
-		IP:        m.IP + "/16",
-		Gateway:   "10.200.0.1",
+		IP:        m.IP + "/24",
+		Gateway:   gateway,
 		MemoryMB:  int64(cfg.VM.MemoryMB),
 		CPUs:      int64(cfg.VM.CPUs),
 		LogPath:   filepath.Join(logDir, m.ID+".log"),
@@ -290,9 +296,9 @@ func (d *Daemon) reconcileOne(ctx context.Context, m store.Machine) error {
 	guest := mmds.Guest{
 		MachineID:  m.ID,
 		App:        m.App,
-		IP:         m.IP + "/16",
-		Gateway:    "10.200.0.1",
-		DNS:        "10.200.0.1",
+		IP:         m.IP + "/24",
+		Gateway:    gateway,
+		DNS:        gateway,
 		Env:        envMap,
 		Entrypoint: rc.Entrypoint,
 		Cmd:        rc.Cmd,
@@ -326,8 +332,11 @@ func (d *Daemon) reconcileOne(ctx context.Context, m store.Machine) error {
 	return nil
 }
 
-// Run starts the DNS server and both API listeners (unix socket, trusted;
-// TCP on 127.0.0.1:<api_port>, bearer-token guarded), blocking until ctx is
+// Run ensures the admin tenant subnet's bridge/DNS listener (idx 0, so a
+// listener always exists on 10.200.0.1:53 even before any machine has ever
+// been deployed, matching the pre-Phase-D behavior of an always-on static
+// listener there) and starts both API listeners (unix socket, trusted; TCP
+// on 127.0.0.1:<api_port>, bearer-token guarded), blocking until ctx is
 // cancelled or one of them fails. The TCP listener is skipped entirely when
 // no APIToken is configured: AuthMiddleware would otherwise compare every
 // request's bearer token against an empty string, so an unset token doesn't
@@ -337,11 +346,9 @@ func (d *Daemon) reconcileOne(ctx context.Context, m store.Machine) error {
 func (d *Daemon) Run(ctx context.Context) error {
 	errCh := make(chan error, 3)
 
-	go func() {
-		if err := d.DNS.ListenAndServe(); err != nil {
-			errCh <- fmt.Errorf("dns: %w", err)
-		}
-	}()
+	if _, _, err := d.ensureBridge(0); err != nil {
+		return fmt.Errorf("ensure admin bridge: %w", err)
+	}
 
 	go d.sampleMetrics(ctx)
 
