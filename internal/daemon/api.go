@@ -91,6 +91,12 @@ func (a *API) AuthMiddleware(next http.Handler) http.Handler {
 // yet), so this also accepts an optional "config" field carrying the
 // oak.toml text. A redeploy of an already-known app can omit it and reuse
 // the last stored config -- see resolveConfig.
+//
+// An optional "owner" field records who created the app (e.g. a GitHub
+// login, set by the frontend panel; the CLI leaves it empty). It's
+// create-time only -- see Store.SetAppOwner -- so a redeploy can pass a
+// different (or no) owner without changing what was recorded on first
+// deploy.
 func (a *API) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if !appconfig.ValidName(name) {
@@ -100,6 +106,7 @@ func (a *API) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Image  string `json:"image"`
 		Config string `json:"config"`
+		Owner  string `json:"owner"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, fmt.Sprintf("decode body: %v", err), http.StatusBadRequest)
@@ -130,6 +137,11 @@ func (a *API) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		progress(fmt.Sprintf("error: %v\n", err))
 		return
+	}
+	// Deploy's UpsertApp has created the app row by now (on both a first
+	// deploy and a redeploy), so the row SetAppOwner needs always exists.
+	if err := a.Store.SetAppOwner(name, body.Owner); err != nil {
+		progress(fmt.Sprintf("warning: failed to record owner: %v\n", err))
 	}
 	progress(fmt.Sprintf("ok %s\n", id))
 }
@@ -597,7 +609,22 @@ func (a *API) handleSSH(w http.ResponseWriter, r *http.Request) {
 	bridge(clientConn, vsockConn)
 }
 
+// handleApps lists registered apps. Plain GET /apps returns the []string
+// the CLI has always expected; GET /apps?detail=1 additionally includes
+// each app's owner (see Store.AppsDetailed), for the frontend panel to
+// filter/enforce by.
 func (a *API) handleApps(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("detail") == "1" {
+		apps, err := a.Store.AppsDetailed()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(apps)
+		return
+	}
+
 	apps, err := a.Store.Apps()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

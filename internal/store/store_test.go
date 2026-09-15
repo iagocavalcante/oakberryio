@@ -1,6 +1,9 @@
 package store
 
-import "testing"
+import (
+	"database/sql"
+	"testing"
+)
 
 func openTemp(t *testing.T) *Store {
 	t.Helper()
@@ -488,5 +491,122 @@ func TestFullCascadeDeleteLeavesNoOrphans(t *testing.T) {
 	}
 	if volumes, err := s.Volumes("b"); err != nil || len(volumes) != 1 {
 		t.Fatalf("b's volumes = %+v, err %v, want 1", volumes, err)
+	}
+}
+
+// --- app ownership ---------------------------------------------------------
+
+func TestSetAppOwnerSetsOnEmptyButNotOnAlreadyOwned(t *testing.T) {
+	s := openTemp(t)
+	if err := s.UpsertApp("a", "{}"); err != nil {
+		t.Fatalf("upsert app: %v", err)
+	}
+
+	if owner, err := s.AppOwner("a"); err != nil || owner != "" {
+		t.Fatalf("owner before SetAppOwner = %q, err %v, want \"\"", owner, err)
+	}
+
+	if err := s.SetAppOwner("a", "alice"); err != nil {
+		t.Fatalf("set owner: %v", err)
+	}
+	if owner, err := s.AppOwner("a"); err != nil || owner != "alice" {
+		t.Fatalf("owner = %q, err %v, want alice", owner, err)
+	}
+
+	// A second call (e.g. a redeploy with a different owner) must not
+	// clobber the owner recorded on first deploy.
+	if err := s.SetAppOwner("a", "bob"); err != nil {
+		t.Fatalf("set owner again: %v", err)
+	}
+	if owner, err := s.AppOwner("a"); err != nil || owner != "alice" {
+		t.Fatalf("owner after second SetAppOwner = %q, err %v, want unchanged alice", owner, err)
+	}
+}
+
+func TestAppsDetailedReturnsNamesAndOwnersSorted(t *testing.T) {
+	s := openTemp(t)
+	if err := s.UpsertApp("b", "{}"); err != nil {
+		t.Fatalf("upsert app b: %v", err)
+	}
+	if err := s.UpsertApp("a", "{}"); err != nil {
+		t.Fatalf("upsert app a: %v", err)
+	}
+	if err := s.SetAppOwner("a", "alice"); err != nil {
+		t.Fatalf("set owner: %v", err)
+	}
+
+	apps, err := s.AppsDetailed()
+	if err != nil {
+		t.Fatalf("apps detailed: %v", err)
+	}
+	want := []AppInfo{{Name: "a", Owner: "alice"}, {Name: "b", Owner: ""}}
+	if len(apps) != len(want) || apps[0] != want[0] || apps[1] != want[1] {
+		t.Fatalf("apps detailed = %+v, want %+v", apps, want)
+	}
+}
+
+// TestAddAppsOwnerColumnMigratesPreExistingSchema exercises the migration
+// oakd's Open runs against a database created before apps.owner existed:
+// schemaSQL's CREATE TABLE IF NOT EXISTS is a no-op against such a
+// database, so addAppsOwnerColumn must ALTER TABLE it in -- and do so
+// without error if called again (Open runs it on every start).
+func TestAddAppsOwnerColumnMigratesPreExistingSchema(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	// The pre-owner-column apps table shape.
+	if _, err := db.Exec(`CREATE TABLE apps (
+		name TEXT PRIMARY KEY, node_id TEXT NOT NULL DEFAULT 'local',
+		config TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')))`); err != nil {
+		t.Fatalf("create old apps table: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO apps(name, config) VALUES ('a', '{}')`); err != nil {
+		t.Fatalf("insert app row: %v", err)
+	}
+
+	if err := addAppsOwnerColumn(db); err != nil {
+		t.Fatalf("migrate (1st): %v", err)
+	}
+	var owner string
+	if err := db.QueryRow(`SELECT owner FROM apps WHERE name = 'a'`).Scan(&owner); err != nil {
+		t.Fatalf("select owner after migration: %v", err)
+	}
+	if owner != "" {
+		t.Fatalf("owner = %q, want \"\" default", owner)
+	}
+
+	// Idempotent: a database that already has the column must not error.
+	if err := addAppsOwnerColumn(db); err != nil {
+		t.Fatalf("migrate (2nd, idempotent): %v", err)
+	}
+}
+
+// TestOpenTwiceIsIdempotent covers the acceptance criterion literally:
+// opening the same on-disk store twice (the schema, including the owner
+// migration, applies on every Open) must not error the second time.
+func TestOpenTwiceIsIdempotent(t *testing.T) {
+	path := t.TempDir() + "/oakd.db"
+
+	s1, err := Open(path)
+	if err != nil {
+		t.Fatalf("open (1st): %v", err)
+	}
+	if err := s1.UpsertApp("a", "{}"); err != nil {
+		t.Fatalf("upsert app: %v", err)
+	}
+	if err := s1.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatalf("open (2nd): %v", err)
+	}
+	t.Cleanup(func() { s2.Close() })
+	if owner, err := s2.AppOwner("a"); err != nil || owner != "" {
+		t.Fatalf("owner after reopen = %q, err %v, want \"\"", owner, err)
 	}
 }

@@ -185,3 +185,95 @@ func TestHandleMetricsJoinsStoreAndSnapshot(t *testing.T) {
 		t.Errorf("machine metrics = %+v, want cpu_pct=33.3 mem_bytes=2048", m)
 	}
 }
+
+// TestHandleAppsPlainReturnsStringSlice locks in the wire contract the CLI
+// depends on (internal/cli/client.go's Client.Apps decodes a bare
+// []string): adding owner to the store must not change GET /apps without
+// ?detail=1.
+func TestHandleAppsPlainReturnsStringSlice(t *testing.T) {
+	d := testDeployer(t, &fakeRuntime{}, &fakeChecker{healthy: true})
+	api := &API{Deployer: d, Store: d.Store}
+	if err := d.Store.UpsertApp("b", "{}"); err != nil {
+		t.Fatalf("upsert app b: %v", err)
+	}
+	if err := d.Store.UpsertApp("a", "{}"); err != nil {
+		t.Fatalf("upsert app a: %v", err)
+	}
+	if err := d.Store.SetAppOwner("a", "alice"); err != nil {
+		t.Fatalf("set owner: %v", err)
+	}
+
+	mux := api.Mux()
+	req := httptest.NewRequest(http.MethodGet, "/apps", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if want := `["a","b"]` + "\n"; w.Body.String() != want {
+		t.Fatalf("body = %q, want %q", w.Body.String(), want)
+	}
+}
+
+// TestHandleAppsDetailReturnsOwners covers GET /apps?detail=1's wire shape:
+// [{"name":"...","owner":"..."}], sorted by name, owner "" when unset.
+func TestHandleAppsDetailReturnsOwners(t *testing.T) {
+	d := testDeployer(t, &fakeRuntime{}, &fakeChecker{healthy: true})
+	api := &API{Deployer: d, Store: d.Store}
+	if err := d.Store.UpsertApp("b", "{}"); err != nil {
+		t.Fatalf("upsert app b: %v", err)
+	}
+	if err := d.Store.UpsertApp("a", "{}"); err != nil {
+		t.Fatalf("upsert app a: %v", err)
+	}
+	if err := d.Store.SetAppOwner("a", "alice"); err != nil {
+		t.Fatalf("set owner: %v", err)
+	}
+
+	mux := api.Mux()
+	req := httptest.NewRequest(http.MethodGet, "/apps?detail=1", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if want := `[{"name":"a","owner":"alice"},{"name":"b","owner":""}]` + "\n"; w.Body.String() != want {
+		t.Fatalf("body = %q, want %q", w.Body.String(), want)
+	}
+}
+
+// TestHandleDeployRecordsOwnerOnCreateNotOnRedeploy exercises the create-only
+// owner contract through the actual HTTP handler: a first deploy's "owner"
+// field is recorded, and a redeploy with a different (or absent) owner
+// leaves it untouched.
+func TestHandleDeployRecordsOwnerOnCreateNotOnRedeploy(t *testing.T) {
+	d := testDeployer(t, &fakeRuntime{waitCh: make(chan error)}, &fakeChecker{healthy: true})
+	api := &API{Deployer: d, Store: d.Store}
+	mux := api.Mux()
+
+	deploy := func(body string) string {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/apps/hello/deploy", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("deploy status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "\nok ") {
+			t.Fatalf("deploy did not report ok: %s", w.Body.String())
+		}
+		return w.Body.String()
+	}
+
+	deploy(`{"image":"img:1","config":"app = \"hello\"","owner":"alice"}`)
+	if owner, err := d.Store.AppOwner("hello"); err != nil || owner != "alice" {
+		t.Fatalf("owner after create = %q, err %v, want alice", owner, err)
+	}
+
+	deploy(`{"image":"img:2","owner":"bob"}`)
+	if owner, err := d.Store.AppOwner("hello"); err != nil || owner != "alice" {
+		t.Fatalf("owner after redeploy = %q, err %v, want unchanged alice", owner, err)
+	}
+}

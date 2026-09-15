@@ -1,6 +1,7 @@
 CREATE TABLE IF NOT EXISTS apps (
   name TEXT PRIMARY KEY, node_id TEXT NOT NULL DEFAULT 'local',
-  config TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')));
+  config TEXT NOT NULL, owner TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')));
 CREATE TABLE IF NOT EXISTS releases (
   id INTEGER PRIMARY KEY, app TEXT NOT NULL REFERENCES apps(name),
   image TEXT NOT NULL, rootfs TEXT NOT NULL, node_id TEXT NOT NULL DEFAULT 'local',

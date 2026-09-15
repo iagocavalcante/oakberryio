@@ -290,6 +290,39 @@ func (c *Client) Apps(ctx context.Context) ([]string, error) {
 	return apps, nil
 }
 
+// AppInfo mirrors one element of GET /apps?detail=1's response: an app's
+// name and owner (owner is "" for an app deployed without one). Its json
+// tags match internal/store.AppInfo's wire shape; kept as a separate type
+// so the CLI doesn't need to import internal/store, the same reason Machine
+// (above) mirrors internal/store.Machine.
+type AppInfo struct {
+	Name  string `json:"name"`
+	Owner string `json:"owner"`
+}
+
+// AppsDetailed lists every app together with its owner, e.g. for the
+// frontend panel to filter/enforce by. Apps stays the plain name list the
+// existing CLI depends on.
+func (c *Client) AppsDetailed(ctx context.Context) ([]AppInfo, error) {
+	req, err := c.NewRequest(ctx, http.MethodGet, "/apps?detail=1", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("apps detailed request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("apps detailed: %w", httpError(resp))
+	}
+	var apps []AppInfo
+	if err := json.NewDecoder(resp.Body).Decode(&apps); err != nil {
+		return nil, fmt.Errorf("decode apps detailed response: %w", err)
+	}
+	return apps, nil
+}
+
 // Machines lists app's machines.
 func (c *Client) Machines(ctx context.Context, app string) ([]Machine, error) {
 	req, err := c.NewRequest(ctx, http.MethodGet, "/apps/"+url.PathEscape(app)+"/machines", nil)

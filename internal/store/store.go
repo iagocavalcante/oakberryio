@@ -39,7 +39,47 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	// schemaSQL's CREATE TABLE IF NOT EXISTS is a no-op against a database
+	// created before the apps.owner column existed, so back-fill it here.
+	if err := addAppsOwnerColumn(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &Store{db: db}, nil
+}
+
+// addAppsOwnerColumn adds the apps.owner column if an older database
+// doesn't have it yet. Idempotent: safe to call on every Open, including
+// against a fresh database whose schemaSQL already declares the column.
+func addAppsOwnerColumn(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(apps)`)
+	if err != nil {
+		return fmt.Errorf("inspect apps schema: %w", err)
+	}
+	defer rows.Close()
+
+	hasOwner := false
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return fmt.Errorf("scan apps column: %w", err)
+		}
+		if name == "owner" {
+			hasOwner = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate apps columns: %w", err)
+	}
+	if hasOwner {
+		return nil
+	}
+	if _, err := db.Exec(`ALTER TABLE apps ADD COLUMN owner TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add apps.owner column: %w", err)
+	}
+	return nil
 }
 
 // Close closes the underlying database.
@@ -94,6 +134,61 @@ func (s *Store) AppConfig(name string) (string, error) {
 		return "", fmt.Errorf("app config for %s: %w", name, err)
 	}
 	return config, nil
+}
+
+// SetAppOwner records app's owner, but only if it doesn't have one yet.
+// Ownership is create-time only: once set, a later call (e.g. a redeploy
+// with a different owner) is a silent no-op, so an app's owner never
+// changes after its first deploy.
+func (s *Store) SetAppOwner(name, owner string) error {
+	if _, err := s.db.Exec(`UPDATE apps SET owner = ? WHERE name = ? AND owner = ''`, owner, name); err != nil {
+		return fmt.Errorf("set owner for app %s: %w", name, err)
+	}
+	return nil
+}
+
+// AppOwner returns app's owner, or "" if it has none.
+func (s *Store) AppOwner(name string) (string, error) {
+	var owner string
+	err := s.db.QueryRow(`SELECT owner FROM apps WHERE name = ?`, name).Scan(&owner)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", fmt.Errorf("app owner for %s: not found", name)
+		}
+		return "", fmt.Errorf("app owner for %s: %w", name, err)
+	}
+	return owner, nil
+}
+
+// AppInfo is one row of an app's name and owner, as returned by
+// AppsDetailed. Owner is "" for an app deployed without one.
+type AppInfo struct {
+	Name  string `json:"name"`
+	Owner string `json:"owner"`
+}
+
+// AppsDetailed lists every registered app with its owner, sorted by name.
+// Apps returns the bare name list the CLI depends on; this is the version
+// listings that need ownership (e.g. the frontend panel) use instead.
+func (s *Store) AppsDetailed() ([]AppInfo, error) {
+	rows, err := s.db.Query(`SELECT name, owner FROM apps ORDER BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("list apps detailed: %w", err)
+	}
+	defer rows.Close()
+
+	var apps []AppInfo
+	for rows.Next() {
+		var info AppInfo
+		if err := rows.Scan(&info.Name, &info.Owner); err != nil {
+			return nil, fmt.Errorf("scan app: %w", err)
+		}
+		apps = append(apps, info)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate apps: %w", err)
+	}
+	return apps, nil
 }
 
 // InsertRelease records a new release for app and returns its id.
