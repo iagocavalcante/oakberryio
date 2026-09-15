@@ -12,6 +12,10 @@ Docker + per-project cloudflared tunnels). Target: oak (`192.168.1.8`, 16 cores 
 - Deploy first **without** `domains` so the app comes up at
   `<app>.iagocavalcante.com`; verify; only then add `domains` and redeploy.
   Adding `domains` is the cutover (oakd rewrites ingress and routes DNS).
+  **Caveat:** if the app name equals the public hostname's first label
+  (e.g. `fitlock` → `fitlock.iagocavalcante.com`), the first deploy *is* the
+  cutover, because oakd routes the default hostname's DNS to the oak tunnel.
+  For those apps stage under a different name or accept the immediate switch.
 - Data moves with `pg_dump | psql` (all DBs are < 50 MB) after the target app is
   up, then a final dump at cutover. Stop the tron container after cutover, keep
   the tron volume for a week, then remove.
@@ -44,7 +48,7 @@ Docker + per-project cloudflared tunnels). Target: oak (`192.168.1.8`, 16 cores 
 
 | # | Public host | tron pieces | oak apps | Source | Deploy path today |
 |---|---|---|---|---|---|
-| 1 | fitlock.iagocavalcante.com | nginx static (`~/apps/fitlock`) | `fitlock` (nginx image + static, or Dockerfile) | Mac `fitlock` | manual |
+| 1 | fitlock.iagocavalcante.com | nginx static (`~/apps/fitlock`) | `fitlock` | Mac `fitlock/web` | **DONE 2026-09-15** — live on oak, tron container stopped, ingress line removed (media tunnel restart pending sudo) |
 | 2 | trainergymai.app / www | trainer-gym-landing | `trainer-gym-landing` | GH `iagocavalcante/trainer-gym-ai` | runner on tron |
 | 3 | prospects.iagocavalcante.com | prospecting nginx + prospector api + outreach + pgvector pg17 | `prospects-web`, `prospector`, `outreach`, `prospector-db` (pgvector image, volume) | Mac `prospector` + tron `~/prospecting` | manual; cron backup on tron |
 | 4 | beatduel.iagocavalcante.com | beatduel-relay + own tunnel + watchdog cron | `beatduel-relay` | tron `~/Workspaces/beatduel-relay` | manual |
