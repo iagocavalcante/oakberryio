@@ -205,7 +205,167 @@ func (d *Deployer) Deploy(ctx context.Context, cfg *appconfig.Config, image stri
 		Env:     string(envJSON),
 		Workdir: meta.WorkingDir,
 	}
+
+	if cfg.Deploy.ReleaseCommand != "" {
+		if err := d.runReleaseCommand(ctx, cfg, rel, progress); err != nil {
+			return "", fmt.Errorf("release command failed, deploy aborted: %w", err)
+		}
+	}
+
 	return d.bootFromRelease(ctx, cfg, rel, progress)
+}
+
+// runReleaseCommand runs cfg.Deploy.ReleaseCommand to completion in a
+// transient microVM booted from rel's rootfs, gating Deploy on its exit
+// status (fly.toml's release_command equivalent, e.g. database migrations).
+// Only Deploy calls this -- Restart/Scale/Reconcile reboot an app's existing
+// release without ever re-running it, see bootFromRelease's and
+// reconcileOne's callers.
+//
+// The transient machine boots with the app's full env (buildGuestEnv, so
+// DATABASE_URL and secrets are present) and network (so *.internal
+// resolves), same as a real machine, but deliberately unlike one:
+//   - no volumes and no health check -- it's not going to serve anything;
+//   - its guest argv is overridden to run the release command through a
+//     shell (["/bin/sh", "-lc", cmd]) instead of the image's own
+//     entrypoint/cmd, so pipes/args/&& in the configured command work;
+//   - it gets a real machine id/IP/tap, allocated exactly like
+//     bootFromRelease does, so it can boot and reach the network, but its
+//     store row is deleted here before returning (success or failure) --
+//     IPs in this design are only ever held by live rows, see
+//     stopOldMachines -- and it is never transitioned to "running", so
+//     RunningMachines/applyTunnel/stopOldMachines never see it as a serving
+//     machine;
+//   - its Handle is kept in a local variable only, never registered via
+//     setHandle/watchMachine: nothing else (Destroy, stopOldMachines, the
+//     ssh bridge) can look it up or race with it, and this function itself
+//     is the sole owner of stopping it.
+//
+// The Firecracker VMM's own exit doesn't carry the guest child's exit
+// status, so this reads it back from the guest's serial console log via the
+// "oak-init: child-exit status=<N>" marker oak-init prints right before
+// powering off (see cmd/oak-init/main.go's run and lastChildExitStatus) --
+// a documented, stringly-typed oakd<->oak-init contract; both live in this
+// one codebase. Exit 0 is success; anything else, or the marker never
+// appearing at all (e.g. the guest crashed first), fails with the release
+// command and the log tail attached.
+func (d *Deployer) runReleaseCommand(ctx context.Context, cfg *appconfig.Config, rel store.Release, progress func(string)) error {
+	emit := func(msg string) {
+		if progress != nil {
+			progress(msg)
+		}
+	}
+	emit("running release command...\n")
+
+	imageEnv, err := decodeReleaseEnv(rel.Env)
+	if err != nil {
+		return err
+	}
+
+	id, err := newMachineID()
+	if err != nil {
+		return fmt.Errorf("generate release machine id: %w", err)
+	}
+	tap := "oak-" + id[:8]
+
+	ip, err := d.Store.AllocAndInsertMachine(id, cfg.App, rel.ID, tap)
+	if err != nil {
+		return fmt.Errorf("alloc ip and insert release machine %s: %w", id, err)
+	}
+	// This row must never outlive this function: it's deliberately never
+	// marked "running" (see the doc comment above), so nothing else --
+	// unlike a real machine's stopOldMachines/watchMachine -- will ever
+	// delete it or free its IP on our behalf.
+	defer func() {
+		if err := d.Store.DeleteMachine(id); err != nil {
+			log.Printf("oakd: delete release machine %s for %s: %v", id, cfg.App, err)
+		}
+	}()
+
+	mac, err := vm.MACFromIP(ip)
+	if err != nil {
+		return fmt.Errorf("mac from ip %s: %w", ip, err)
+	}
+	envMap, err := d.buildGuestEnv(cfg, imageEnv)
+	if err != nil {
+		return fmt.Errorf("build guest env: %w", err)
+	}
+
+	logDir := filepath.Join(d.LogDir, cfg.App)
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		return fmt.Errorf("mkdir log dir %s: %w", logDir, err)
+	}
+	logPath := filepath.Join(logDir, id+".log")
+
+	guest := mmds.Guest{
+		MachineID: id,
+		App:       cfg.App,
+		IP:        ip + "/16",
+		Gateway:   "10.200.0.1",
+		DNS:       "10.200.0.1",
+		Env:       envMap,
+		// Run the release command through a shell instead of the image's own
+		// entrypoint/cmd, exactly like fly.toml's release_command, so
+		// pipes/args/&& in the configured command work.
+		Entrypoint: []string{"/bin/sh", "-lc", cfg.Deploy.ReleaseCommand},
+		WorkingDir: rel.Workdir,
+	}
+	spec := vm.Spec{
+		ID:        id,
+		Kernel:    d.kernel(),
+		RootFS:    rel.RootFS,
+		Tap:       tap,
+		MAC:       mac,
+		IP:        ip + "/16",
+		Gateway:   "10.200.0.1",
+		MemoryMB:  int64(cfg.VM.MemoryMB),
+		CPUs:      int64(cfg.VM.CPUs),
+		LogPath:   logPath,
+		SocketDir: d.socketDir(),
+		VsockUDS:  vsockSocketPath(d.socketDir(), id),
+		GuestCID:  vsockGuestCID,
+	}
+
+	// Same stale-socket guard as bootFromRelease/reconcileOne.
+	if err := os.Remove(filepath.Join(d.socketDir(), id+".sock")); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove stale socket for %s: %w", id, err)
+	}
+	if err := os.Remove(spec.VsockUDS); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove stale vsock socket for %s: %w", id, err)
+	}
+
+	// Same BaseCtx reasoning as bootFromRelease: the VMM must outlive the
+	// caller's per-request ctx, or it dies the instant an HTTP handler
+	// returns.
+	handle, err := d.Runtime.Start(context.WithoutCancel(d.baseCtx()), spec, guest)
+	if err != nil {
+		return fmt.Errorf("start release machine: %w", err)
+	}
+	// Deliberately no setHandle/watchMachine (see doc comment): this
+	// function is the sole owner of this handle's lifecycle. Stop is
+	// best-effort and idempotent-in-effect with the VM already having
+	// powered itself off in the success path below.
+	defer func() {
+		_ = handle.Stop(context.WithoutCancel(d.baseCtx()))
+	}()
+
+	if err := handle.Wait(ctx); err != nil {
+		return fmt.Errorf("release command %q: wait for machine: %w\n--- last 50 lines of %s ---\n%s",
+			cfg.Deploy.ReleaseCommand, err, logPath, readLastLines(logPath, 50))
+	}
+
+	status, ok := lastChildExitStatus(logPath)
+	if !ok {
+		return fmt.Errorf("release command %q: no exit status found (guest may have crashed before oak-init could report one)\n--- last 50 lines of %s ---\n%s",
+			cfg.Deploy.ReleaseCommand, logPath, readLastLines(logPath, 50))
+	}
+	if status != 0 {
+		return fmt.Errorf("release command %q exited %d\n--- last 50 lines of %s ---\n%s",
+			cfg.Deploy.ReleaseCommand, status, logPath, readLastLines(logPath, 50))
+	}
+
+	emit("release command succeeded\n")
+	return nil
 }
 
 // bootFromRelease is Deploy's "boot half": it builds a fresh VM spec/guest
@@ -873,6 +1033,41 @@ func readLastLines(path string, n int) string {
 		lines = lines[len(lines)-n:]
 	}
 	return strings.Join(lines, "\n")
+}
+
+// childExitMarker is the prefix of the line oak-init prints to the guest's
+// serial console right before powering off, for every run (see
+// cmd/oak-init/main.go's run): "oak-init: child-exit status=<N>". It's the
+// only way to recover a guest child's exit status, since the Firecracker
+// VMM's own exit doesn't carry one -- a documented oakd<->oak-init contract.
+const childExitMarker = "oak-init: child-exit status="
+
+// lastChildExitStatus scans the guest console log at path for the LAST
+// childExitMarker line and returns the status it reports. It reads from the
+// end of the log (rather than the first match) so an application that
+// happens to print similar-looking text to its own stdout earlier in the
+// log -- which lands in the same file -- can never be mistaken for the real
+// marker oak-init itself prints exactly once, at the very end. ok is false
+// if the marker never appears (e.g. the guest crashed or was killed before
+// oak-init could print it) or the log can't be read at all.
+func lastChildExitStatus(path string) (status int, ok bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	lines := strings.Split(string(data), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		rest, found := strings.CutPrefix(strings.TrimSpace(lines[i]), childExitMarker)
+		if !found {
+			continue
+		}
+		n, err := strconv.Atoi(rest)
+		if err != nil {
+			return 0, false
+		}
+		return n, true
+	}
+	return 0, false
 }
 
 // decodeReleaseCmd parses the JSON stored in a release's cmd column.

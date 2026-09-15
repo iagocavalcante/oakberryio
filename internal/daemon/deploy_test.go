@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -67,6 +68,18 @@ type fakeRuntime struct {
 	// test can assert on its lifetime independent of the ctx passed to
 	// Deploy (see TestDeployStartCtxSurvivesRequestCancellation).
 	startCtx context.Context
+
+	// onStart, if set, runs synchronously inside Start with the spec and
+	// guest just passed to it, and its return value -- if non-nil -- is
+	// used as this call's handle's waitCh instead of the shared r.waitCh.
+	// This lets a test single out one particular Start call (e.g. a
+	// release-command run, identifiable by its shell entrypoint) to behave
+	// differently from the others: writing a synthetic "oak-init:
+	// child-exit status=<N>" line to spec.LogPath, the way oak-init's real
+	// marker would appear (see lastChildExitStatus), and returning an
+	// already-resolved channel so that machine's Wait returns immediately
+	// while every other call keeps blocking on r.waitCh like before.
+	onStart func(spec vm.Spec, guest mmds.Guest) chan error
 }
 
 func (r *fakeRuntime) BuildRootfs(ctx context.Context, image, out string) (*rootfs.ImageMeta, error) {
@@ -81,12 +94,50 @@ func (r *fakeRuntime) Start(ctx context.Context, spec vm.Spec, meta mmds.Guest) 
 	if r.startErr != nil {
 		return nil, r.startErr
 	}
+	waitCh := r.waitCh
+	if r.onStart != nil {
+		if ch := r.onStart(spec, meta); ch != nil {
+			waitCh = ch
+		}
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.nextPID++
 	r.starts = append(r.starts, spec)
 	r.startCtx = ctx
-	return &fakeHandle{pid: r.nextPID, waitCh: r.waitCh}, nil
+	return &fakeHandle{pid: r.nextPID, waitCh: waitCh}, nil
+}
+
+// writeChildExitMarker writes a log file containing oak-init's real
+// child-exit marker line, simulating what the guest's serial console would
+// contain after oak-init runs the release command and powers off -- so
+// lastChildExitStatus (production code) can read it back exactly as it
+// would a real machine's log.
+func writeChildExitMarker(t *testing.T, path string, status int) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("mkdir log dir: %v", err)
+	}
+	line := fmt.Sprintf("some app output\noak-init: child-exit status=%d\n", status)
+	if err := os.WriteFile(path, []byte(line), 0644); err != nil {
+		t.Fatalf("write log %s: %v", path, err)
+	}
+}
+
+// resolvedChan returns a channel that already holds err, for onStart hooks
+// that want a handle's Wait to return immediately rather than block on the
+// shared fakeRuntime.waitCh.
+func resolvedChan(err error) chan error {
+	ch := make(chan error, 1)
+	ch <- err
+	return ch
+}
+
+// isReleaseCommandGuest reports whether guest's argv is a release-command
+// invocation, i.e. runReleaseCommand's shell override ([]string{"/bin/sh",
+// "-lc", cmd}), as opposed to a normal app boot's image entrypoint/cmd.
+func isReleaseCommandGuest(guest mmds.Guest) bool {
+	return len(guest.Entrypoint) > 0 && guest.Entrypoint[0] == "/bin/sh"
 }
 
 type fakeChecker struct {
@@ -705,5 +756,193 @@ func TestDestroyLeavesOtherAppsUntouched(t *testing.T) {
 	machines, err := d.Store.MachinesForApp("other")
 	if err != nil || len(machines) != 1 || machines[0].ID != survivorID {
 		t.Fatalf("other's machine = %+v, err %v, want just %s", machines, err, survivorID)
+	}
+}
+
+// --- release_command ---------------------------------------------------
+
+func TestDeployRunsReleaseCommandThenBootsApp(t *testing.T) {
+	rt := &fakeRuntime{}
+	rt.onStart = func(spec vm.Spec, guest mmds.Guest) chan error {
+		if !isReleaseCommandGuest(guest) {
+			return nil // the real app machine boots and blocks like normal
+		}
+		writeChildExitMarker(t, spec.LogPath, 0)
+		return resolvedChan(nil)
+	}
+	d := testDeployer(t, rt, &fakeChecker{healthy: true})
+	cfg := baseConfig("hello")
+	cfg.Deploy.ReleaseCommand = "/app/bin/migrate"
+
+	id, err := d.Deploy(context.Background(), cfg, "img:1", nil)
+	if err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+
+	rt.mu.Lock()
+	numStarts := len(rt.starts)
+	rt.mu.Unlock()
+	if numStarts != 2 {
+		t.Fatalf("want 2 Start calls (release command + app), got %d", numStarts)
+	}
+
+	machines, err := d.Store.MachinesForApp("hello")
+	if err != nil {
+		t.Fatalf("machines for app: %v", err)
+	}
+	// The release machine's row must be gone -- only the real app machine,
+	// running, is left; the release machine never held a "running" row or
+	// an IP past this function's return (see runReleaseCommand's doc
+	// comment).
+	if len(machines) != 1 {
+		t.Fatalf("want exactly 1 machine row left (release machine cleaned up), got %d: %+v", len(machines), machines)
+	}
+	if machines[0].ID != id || machines[0].State != "running" {
+		t.Fatalf("app machine not running: %+v", machines[0])
+	}
+}
+
+func TestDeployFailingReleaseCommandBootsNoAppMachine(t *testing.T) {
+	rt := &fakeRuntime{}
+	rt.onStart = func(spec vm.Spec, guest mmds.Guest) chan error {
+		if !isReleaseCommandGuest(guest) {
+			return nil
+		}
+		writeChildExitMarker(t, spec.LogPath, 1)
+		return resolvedChan(nil)
+	}
+	d := testDeployer(t, rt, &fakeChecker{healthy: true})
+	cfg := baseConfig("hello")
+	cfg.Deploy.ReleaseCommand = "/app/bin/migrate"
+
+	if _, err := d.Deploy(context.Background(), cfg, "img:1", nil); err == nil {
+		t.Fatal("want error from failing release command")
+	} else if !strings.Contains(err.Error(), "/app/bin/migrate") {
+		t.Fatalf("error should mention the release command: %v", err)
+	}
+
+	rt.mu.Lock()
+	numStarts := len(rt.starts)
+	rt.mu.Unlock()
+	if numStarts != 1 {
+		t.Fatalf("want only 1 Start call (release command only, app never booted), got %d", numStarts)
+	}
+
+	machines, err := d.Store.MachinesForApp("hello")
+	if err != nil {
+		t.Fatalf("machines for app: %v", err)
+	}
+	if len(machines) != 0 {
+		t.Fatalf("want no leftover machine rows after a failed release command, got %+v", machines)
+	}
+}
+
+func TestDeployReleaseCommandNoExitMarkerFailsDeploy(t *testing.T) {
+	rt := &fakeRuntime{}
+	rt.onStart = func(spec vm.Spec, guest mmds.Guest) chan error {
+		if !isReleaseCommandGuest(guest) {
+			return nil
+		}
+		// The VM "powers off" (Wait returns cleanly) but never printed
+		// oak-init's marker -- e.g. it crashed before getting there.
+		return resolvedChan(nil)
+	}
+	d := testDeployer(t, rt, &fakeChecker{healthy: true})
+	cfg := baseConfig("hello")
+	cfg.Deploy.ReleaseCommand = "/app/bin/migrate"
+
+	if _, err := d.Deploy(context.Background(), cfg, "img:1", nil); err == nil {
+		t.Fatal("want error when no exit marker is found")
+	}
+
+	machines, err := d.Store.MachinesForApp("hello")
+	if err != nil {
+		t.Fatalf("machines for app: %v", err)
+	}
+	if len(machines) != 0 {
+		t.Fatalf("want no leftover machine rows, got %+v", machines)
+	}
+}
+
+func TestReconcileDoesNotRunReleaseCommand(t *testing.T) {
+	rt := &fakeRuntime{}
+	deployer := testDeployer(t, rt, &fakeChecker{healthy: true})
+	dm := &Daemon{Store: deployer.Store, Deployer: deployer}
+
+	cfg := baseConfig("hello")
+	cfg.Deploy.ReleaseCommand = "/app/bin/migrate"
+	configJSON, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal cfg: %v", err)
+	}
+	if err := deployer.Store.UpsertApp(cfg.App, string(configJSON)); err != nil {
+		t.Fatalf("upsert app: %v", err)
+	}
+
+	rootfsPath := filepath.Join(t.TempDir(), "img.ext4")
+	cmdJSON, err := json.Marshal(releaseCmd{Entrypoint: []string{"/bin/app"}})
+	if err != nil {
+		t.Fatalf("marshal release cmd: %v", err)
+	}
+	envJSON, err := json.Marshal([]string{})
+	if err != nil {
+		t.Fatalf("marshal release env: %v", err)
+	}
+	releaseID, err := deployer.Store.InsertRelease(cfg.App, "img:1", rootfsPath, string(cmdJSON), string(envJSON), "/")
+	if err != nil {
+		t.Fatalf("insert release: %v", err)
+	}
+
+	id := "abcdef012345"
+	if _, err := deployer.Store.AllocAndInsertMachine(id, cfg.App, releaseID, "oak-abcdef01"); err != nil {
+		t.Fatalf("alloc and insert machine: %v", err)
+	}
+	if err := deployer.Store.SetMachineState(id, "running", 1234); err != nil {
+		t.Fatalf("set machine state: %v", err)
+	}
+	m, err := deployer.Store.Machine(id)
+	if err != nil {
+		t.Fatalf("load machine: %v", err)
+	}
+
+	// reconcileOne must reboot the existing machine as-is, with no release
+	// command run along the way even though cfg has one configured -- that
+	// only ever happens from Deploy, never a reboot of an already-running
+	// machine after a daemon restart.
+	if err := dm.reconcileOne(context.Background(), m); err != nil {
+		t.Fatalf("reconcileOne: %v", err)
+	}
+
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if len(rt.starts) != 1 {
+		t.Fatalf("want exactly 1 Start call (no release-command boot), got %d", len(rt.starts))
+	}
+}
+
+func TestRestartDoesNotRunReleaseCommand(t *testing.T) {
+	rt := &fakeRuntime{}
+	d := testDeployer(t, rt, &fakeChecker{healthy: true})
+	cfg := baseConfig("hello")
+
+	if _, err := d.Deploy(context.Background(), cfg, "img:1", nil); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+
+	// Set ReleaseCommand only after the initial deploy, directly on the
+	// same *appconfig.Config Restart will read back via appConfig's cache
+	// (Deploy caches the exact pointer passed in) -- Restart must not run
+	// it even though it's now set, since only Deploy triggers a release
+	// command.
+	cfg.Deploy.ReleaseCommand = "/app/bin/migrate"
+
+	if _, err := d.Restart(context.Background(), "hello", nil); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if len(rt.starts) != 2 {
+		t.Fatalf("want 2 Start calls total (initial deploy + restart, no release-command boot), got %d", len(rt.starts))
 	}
 }

@@ -140,7 +140,13 @@ func run() error {
 		_ = unix.Unmount(m.Dest, 0)
 	}
 
-	fmt.Printf("oak-init: exit %d\n", code)
+	// A stable, unambiguous marker for oakd to grep out of this machine's
+	// serial console log: the Firecracker VMM's own exit doesn't carry the
+	// child's exit code, so a release-command run (see
+	// Deployer.runReleaseCommand) reads this line back to learn whether the
+	// command succeeded. Printed for every run, not just release ones -- an
+	// oakd<->oak-init contract, both live in this one codebase.
+	fmt.Printf("oak-init: child-exit status=%d\n", code)
 	unix.Sync()
 	return unix.Reboot(unix.LINUX_REBOOT_CMD_POWER_OFF)
 }

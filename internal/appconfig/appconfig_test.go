@@ -84,3 +84,28 @@ domains = ["not a domain"]
 		t.Fatal("want error")
 	}
 }
+
+func TestParsesReleaseCommand(t *testing.T) {
+	c, err := Parse([]byte(`
+app = "hello"
+
+[deploy]
+release_command = "/app/bin/migrate"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Deploy.ReleaseCommand != "/app/bin/migrate" {
+		t.Fatalf("release command = %q", c.Deploy.ReleaseCommand)
+	}
+}
+
+func TestReleaseCommandDefaultsEmpty(t *testing.T) {
+	c, err := Parse([]byte(`app = "hello"`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Deploy.ReleaseCommand != "" {
+		t.Fatalf("want empty release command by default, got %q", c.Deploy.ReleaseCommand)
+	}
+}

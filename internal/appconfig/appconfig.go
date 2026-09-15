@@ -39,6 +39,7 @@ type Config struct {
 	// operator is responsible for pointing its DNS at the tunnel and for
 	// TLS coverage in that domain's own Cloudflare zone.
 	Domains []string `toml:"domains"`
+	Deploy  Deploy   `toml:"deploy"`
 }
 type Build struct {
 	Dockerfile string            `toml:"dockerfile"`
@@ -58,6 +59,14 @@ type Mount struct {
 type VM struct {
 	MemoryMB int `toml:"memory_mb"`
 	CPUs     int `toml:"cpus"`
+}
+type Deploy struct {
+	// ReleaseCommand, if non-empty, is run to completion in a transient
+	// microVM before each Deploy boots the app's new machine (e.g. fly.toml's
+	// release_command equivalent -- database migrations). Empty means no
+	// release command; never run on Reconcile/Restart/Scale, only on Deploy.
+	// See Deployer.runReleaseCommand.
+	ReleaseCommand string `toml:"release_command"`
 }
 
 func Parse(b []byte) (*Config, error) {
