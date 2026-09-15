@@ -3,7 +3,8 @@
 // Command oak-init is PID 1 inside an oakberryio guest microVM. It brings
 // up networking from Firecracker's MMDS, mounts volumes, execs the image's
 // entrypoint/cmd as a child, reaps zombies, forwards termination signals,
-// and powers the VM off when the child exits.
+// and reboots to bring the VM down when the child exits (Firecracker exits the
+// VMM on guest reboot).
 package main
 
 import (
@@ -40,12 +41,18 @@ func main() {
 }
 
 // fatal prints the error to the serial console, gives the log a moment to
-// flush, then powers the VM off. There is nothing else useful oak-init can
+// flush, then brings the VM down. There is nothing else useful oak-init can
 // do once boot fails: there is no shell to drop into.
+//
+// It uses RESTART, not POWER_OFF: Firecracker exits its VMM process when the
+// guest reboots, but merely halts the CPU (leaving the VMM running) on a
+// guest poweroff. oakd waits on the VMM process exiting to notice a machine
+// is gone (handle.Wait, e.g. runReleaseCommand), so a poweroff here would
+// hang that wait forever.
 func fatal(err error) {
 	fmt.Fprintf(os.Stderr, "oak-init: fatal: %v\n", err)
 	time.Sleep(2 * time.Second)
-	_ = unix.Reboot(unix.LINUX_REBOOT_CMD_POWER_OFF)
+	_ = unix.Reboot(unix.LINUX_REBOOT_CMD_RESTART)
 	os.Exit(1)
 }
 
@@ -148,7 +155,12 @@ func run() error {
 	// oakd<->oak-init contract, both live in this one codebase.
 	fmt.Printf("oak-init: child-exit status=%d\n", code)
 	unix.Sync()
-	return unix.Reboot(unix.LINUX_REBOOT_CMD_POWER_OFF)
+	// RESTART, not POWER_OFF: Firecracker exits its VMM process on a guest
+	// reboot but only halts the CPU (VMM stays alive) on a guest poweroff.
+	// oakd learns a machine has exited by waiting on the VMM process (see
+	// runReleaseCommand's handle.Wait, and watchMachine for an app that
+	// exits on its own), so a poweroff would strand that wait forever.
+	return unix.Reboot(unix.LINUX_REBOOT_CMD_RESTART)
 }
 
 // ensureStdio makes sure PID 1 has valid file descriptors 0, 1 and 2 before
