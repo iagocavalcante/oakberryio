@@ -1,10 +1,13 @@
 package daemon
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/iagocavalcante/oakberryio/internal/metrics"
 )
 
 // TestAPIRejectsInvalidAppName covers HIGH #10: every handler reading
@@ -74,5 +77,111 @@ func TestHandleListSecretsReturnsSortedKeysOnly(t *testing.T) {
 	}
 	if w.Body.String() != `["AKEY","ZKEY"]`+"\n" {
 		t.Fatalf("body = %q, want sorted key names only", w.Body.String())
+	}
+}
+
+// insertRunningMachine records app's release+machine rows and marks the
+// machine running with pid, for tests that need a running machine to show
+// up in Store.RunningMachines() (handleMetrics' join).
+func insertRunningMachine(t *testing.T, d *Deployer, app string, pid int) string {
+	t.Helper()
+	if err := d.Store.UpsertApp(app, "{}"); err != nil {
+		t.Fatalf("upsert app: %v", err)
+	}
+	releaseID, err := d.Store.InsertRelease(app, "img:1", "/rootfs.ext4", "{}", "[]", "/")
+	if err != nil {
+		t.Fatalf("insert release: %v", err)
+	}
+	id := app + "-m1"
+	if _, err := d.Store.AllocAndInsertMachine(id, app, releaseID, "oak-"+id); err != nil {
+		t.Fatalf("alloc and insert machine: %v", err)
+	}
+	if err := d.Store.SetMachineState(id, "running", pid); err != nil {
+		t.Fatalf("set machine state: %v", err)
+	}
+	return id
+}
+
+// TestHandleDashboardIsExemptFromAuth: GET /dashboard must be reachable
+// with no bearer token at all, since a plain browser navigation can't send
+// one -- see AuthMiddleware's doc comment.
+func TestHandleDashboardIsExemptFromAuth(t *testing.T) {
+	d := testDeployer(t, &fakeRuntime{}, &fakeChecker{healthy: true})
+	api := &API{Deployer: d, Store: d.Store, Token: "secret", Metrics: &metricsHolder{}}
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+	w := httptest.NewRecorder()
+	api.AuthMiddleware(api.Mux()).ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Fatalf("content-type = %q, want text/html", ct)
+	}
+	if !strings.Contains(w.Body.String(), "<title>") {
+		t.Fatalf("body doesn't look like the dashboard page: %s", w.Body.String())
+	}
+}
+
+// TestHandleMetricsRequiresAuth: unlike /dashboard, the data endpoint stays
+// behind the bearer token even though both are served from the same mux.
+func TestHandleMetricsRequiresAuth(t *testing.T) {
+	d := testDeployer(t, &fakeRuntime{}, &fakeChecker{healthy: true})
+	api := &API{Deployer: d, Store: d.Store, Token: "secret", Metrics: &metricsHolder{}}
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	w := httptest.NewRecorder()
+	api.AuthMiddleware(api.Mux()).ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+}
+
+// TestHandleMetricsJoinsStoreAndSnapshot exercises the wire shape of
+// GET /metrics: host metrics from the published snapshot, and one entry per
+// running machine joining the store's id/app/ip/pid/state with that
+// machine's sampled cpu/mem from the snapshot.
+func TestHandleMetricsJoinsStoreAndSnapshot(t *testing.T) {
+	d := testDeployer(t, &fakeRuntime{}, &fakeChecker{healthy: true})
+	id := insertRunningMachine(t, d, "hello", 4321)
+
+	mh := &metricsHolder{}
+	mh.set(metrics.Snapshot{
+		Host: metrics.HostMetrics{CPUPct: 12.5, VMCount: 1},
+		Machines: map[string]metrics.MachineMetrics{
+			id: {CPUPct: 33.3, MemBytes: 2048},
+		},
+	})
+	api := &API{Deployer: d, Store: d.Store, Metrics: mh}
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	w := httptest.NewRecorder()
+	api.Mux().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var body struct {
+		Host     metrics.HostMetrics `json:"host"`
+		Machines []metricsMachine    `json:"machines"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Host.CPUPct != 12.5 {
+		t.Errorf("host cpu_pct = %v, want 12.5", body.Host.CPUPct)
+	}
+	if len(body.Machines) != 1 {
+		t.Fatalf("machines = %+v, want exactly one", body.Machines)
+	}
+	m := body.Machines[0]
+	if m.ID != id || m.App != "hello" || m.PID != 4321 || m.State != "running" {
+		t.Errorf("machine = %+v, want id=%s app=hello pid=4321 state=running", m, id)
+	}
+	if m.CPUPct != 33.3 || m.MemBytes != 2048 {
+		t.Errorf("machine metrics = %+v, want cpu_pct=33.3 mem_bytes=2048", m)
 	}
 }

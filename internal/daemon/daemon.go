@@ -9,15 +9,47 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
+	"time"
 
 	"filippo.io/age"
 
 	"github.com/iagocavalcante/oakberryio/internal/dns"
+	"github.com/iagocavalcante/oakberryio/internal/metrics"
 	"github.com/iagocavalcante/oakberryio/internal/mmds"
 	"github.com/iagocavalcante/oakberryio/internal/secrets"
 	"github.com/iagocavalcante/oakberryio/internal/store"
 	"github.com/iagocavalcante/oakberryio/internal/vm"
 )
+
+// metricsSampleInterval is how often the daemon recomputes the metrics
+// snapshot the control panel reads; see docs/plans/
+// 2026-09-15-control-panel-design.md. Sampling in the background (not per
+// request) keeps GET /metrics cheap and lets CPU% be a real delta between
+// samples, not a single instantaneous reading.
+const metricsSampleInterval = 2 * time.Second
+
+// metricsHolder stores the latest metrics.Snapshot behind a mutex. It's its
+// own tiny type, rather than a field directly on Daemon or API, so the
+// sampling goroutine (writer, in Run) and handleMetrics (reader, in api.go)
+// can share one lock without either struct needing to reach into the
+// other.
+type metricsHolder struct {
+	mu   sync.Mutex
+	snap metrics.Snapshot
+}
+
+func (h *metricsHolder) set(s metrics.Snapshot) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.snap = s
+}
+
+func (h *metricsHolder) get() metrics.Snapshot {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.snap
+}
 
 // Config is oakd's configuration, loaded from /etc/oak/oakd.toml.
 type Config struct {
@@ -66,6 +98,12 @@ type Daemon struct {
 	Deployer *Deployer
 	DNS      *dns.Server
 	API      *API
+
+	// sampler computes host/VM resource-usage snapshots; see Run's metrics
+	// goroutine. metricsHolder is the published result API.handleMetrics
+	// reads.
+	sampler       *metrics.Sampler
+	metricsHolder *metricsHolder
 }
 
 // New opens the store, loads the age identity (if KeyFile is set), and
@@ -136,9 +174,18 @@ func New(ctx context.Context, cfg Config) (*Daemon, error) {
 		},
 	}
 
-	api := &API{Deployer: deployer, Store: st, Token: cfg.APIToken}
+	mh := &metricsHolder{}
+	api := &API{Deployer: deployer, Store: st, Token: cfg.APIToken, Metrics: mh}
 
-	return &Daemon{cfg: cfg, Store: st, Deployer: deployer, DNS: dnsServer, API: api}, nil
+	return &Daemon{
+		cfg:           cfg,
+		Store:         st,
+		Deployer:      deployer,
+		DNS:           dnsServer,
+		API:           api,
+		sampler:       metrics.NewSampler(cfg.DataDir),
+		metricsHolder: mh,
+	}, nil
 }
 
 // Reconcile re-starts every machine the store thinks is running. A daemon
@@ -271,6 +318,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 	}()
 
+	go d.sampleMetrics(ctx)
+
 	mux := d.API.Mux()
 
 	unixLn, err := listenUnix(d.cfg.Socket)
@@ -313,6 +362,39 @@ func (d *Daemon) Run(ctx context.Context) error {
 			_ = tcpLn.Close()
 		}
 		return err
+	}
+}
+
+// sampleMetrics recomputes the metrics snapshot every metricsSampleInterval
+// until ctx is done, publishing each result to d.metricsHolder for
+// handleMetrics to read. A sampling failure (e.g. a transient /proc read
+// error) is logged and skipped rather than fatal -- the control panel is a
+// read-only convenience, not something worth taking the daemon down over.
+func (d *Daemon) sampleMetrics(ctx context.Context) {
+	ticker := time.NewTicker(metricsSampleInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			machines, err := d.Store.RunningMachines()
+			if err != nil {
+				log.Printf("oakd: metrics: list running machines: %v", err)
+				continue
+			}
+			pids := make([]metrics.MachinePID, len(machines))
+			for i, m := range machines {
+				pids[i] = metrics.MachinePID{ID: m.ID, PID: int(m.PID)}
+			}
+			snap, err := d.sampler.Sample(pids)
+			if err != nil {
+				log.Printf("oakd: metrics: sample: %v", err)
+				continue
+			}
+			d.metricsHolder.set(snap)
+		}
 	}
 }
 

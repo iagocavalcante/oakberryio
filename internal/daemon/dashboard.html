@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>oak</title>
+<style>
+  :root {
+    --bg: #f5f5f4;
+    --panel: #ffffff;
+    --border: #e2e2e0;
+    --text: #1c1c1a;
+    --muted: #6b6b68;
+    --bar-track: #ececea;
+    --bar-fill: #3b6ea5;
+    --bar-fill-warn: #b5772f;
+    --bar-fill-hot: #b3402f;
+    --accent: #3b6ea5;
+    --danger: #b3402f;
+    --row-hover: #f0f0ee;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16161a;
+      --panel: #1e1e23;
+      --border: #303038;
+      --text: #e8e8ea;
+      --muted: #9a9aa2;
+      --bar-track: #2b2b32;
+      --bar-fill: #5b9bd9;
+      --bar-fill-warn: #d99a4e;
+      --bar-fill-hot: #e05b48;
+      --accent: #5b9bd9;
+      --danger: #e05b48;
+      --row-hover: #26262d;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 15px;
+  }
+  body { padding: 20px 16px 48px; }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  h1 {
+    font-size: 17px;
+    font-weight: 600;
+    margin: 0 0 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  h1 .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--accent);
+    flex: none;
+  }
+  h1 .dot.stale { background: var(--danger); }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 14px 24px;
+  }
+  .stat { min-width: 0; }
+  .stat-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12.5px;
+    color: var(--muted);
+    margin-bottom: 5px;
+    gap: 8px;
+  }
+  .stat-label b { color: var(--text); font-weight: 600; }
+  .bar {
+    height: 7px;
+    border-radius: 4px;
+    background: var(--bar-track);
+    overflow: hidden;
+  }
+  .bar > i {
+    display: block;
+    height: 100%;
+    background: var(--bar-fill);
+    border-radius: 4px;
+    transition: width 0.4s ease;
+  }
+  .bar > i.warn { background: var(--bar-fill-warn); }
+  .bar > i.hot { background: var(--bar-fill-hot); }
+  .facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 20px;
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+    font-size: 12.5px;
+    color: var(--muted);
+  }
+  .facts b { color: var(--text); font-weight: 600; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th, td {
+    text-align: left;
+    padding: 7px 8px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  th {
+    font-weight: 600;
+    color: var(--muted);
+    font-size: 11.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  tbody tr:hover { background: var(--row-hover); }
+  tbody tr:last-child td { border-bottom: none; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .empty { color: var(--muted); padding: 8px 0; font-size: 13.5px; }
+  .table-scroll { overflow-x: auto; }
+
+  #error {
+    display: none;
+    background: var(--panel);
+    border: 1px solid var(--danger);
+    color: var(--danger);
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 13.5px;
+    margin-bottom: 16px;
+  }
+
+  #token-screen { display: none; }
+  #token-screen .panel { max-width: 420px; margin: 60px auto 0; }
+  #token-screen p { color: var(--muted); font-size: 13.5px; margin: 0 0 14px; }
+  #token-screen form { display: flex; gap: 8px; }
+  #token-screen input {
+    flex: 1;
+    min-width: 0;
+    padding: 9px 10px;
+    border-radius: 7px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  #token-screen button {
+    padding: 9px 16px;
+    border-radius: 7px;
+    border: none;
+    background: var(--accent);
+    color: #fff;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  #token-screen button:active { opacity: 0.85; }
+
+  #app-screen { display: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div id="token-screen">
+    <div class="panel">
+      <h1><span class="dot"></span>oak control panel</h1>
+      <p>Enter the API token from oakd.toml (<code>api_token</code>) to view live metrics.</p>
+      <form id="token-form">
+        <input id="token-input" type="password" autocomplete="off" placeholder="API token" />
+        <button type="submit">Connect</button>
+      </form>
+    </div>
+  </div>
+
+  <div id="app-screen">
+    <h1><span class="dot" id="status-dot"></span>oak control panel</h1>
+
+    <div id="error"></div>
+
+    <div class="panel">
+      <div class="stats-grid">
+        <div class="stat">
+          <div class="stat-label"><span>CPU</span><b id="host-cpu-label">–</b></div>
+          <div class="bar"><i id="host-cpu-bar" style="width:0%"></i></div>
+        </div>
+        <div class="stat">
+          <div class="stat-label"><span>Memory</span><b id="host-mem-label">–</b></div>
+          <div class="bar"><i id="host-mem-bar" style="width:0%"></i></div>
+        </div>
+        <div class="stat">
+          <div class="stat-label"><span>Disk</span><b id="host-disk-label">–</b></div>
+          <div class="bar"><i id="host-disk-bar" style="width:0%"></i></div>
+        </div>
+      </div>
+      <div class="facts">
+        <span>load1 <b id="fact-load1">–</b></span>
+        <span>uptime <b id="fact-uptime">–</b></span>
+        <span>running VMs <b id="fact-vmcount">–</b></span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr><th>App</th><th>Machine</th><th>IP</th><th>CPU</th><th>Memory</th></tr>
+          </thead>
+          <tbody id="machines-body"></tbody>
+        </table>
+        <div class="empty" id="machines-empty" style="display:none">No running microVMs.</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var TOKEN_KEY = "oak_token";
+  var POLL_MS = 3000;
+
+  var tokenScreen = document.getElementById("token-screen");
+  var appScreen = document.getElementById("app-screen");
+  var tokenForm = document.getElementById("token-form");
+  var tokenInput = document.getElementById("token-input");
+  var errorBox = document.getElementById("error");
+  var statusDot = document.getElementById("status-dot");
+  var pollTimer = null;
+
+  function showTokenScreen(message) {
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+    appScreen.style.display = "none";
+    tokenScreen.style.display = "block";
+    var err = document.getElementById("token-error");
+    if (message) {
+      if (!err) {
+        err = document.createElement("p");
+        err.id = "token-error";
+        err.style.color = "var(--danger)";
+        tokenForm.parentNode.insertBefore(err, tokenForm);
+      }
+      err.textContent = message;
+    } else if (err) {
+      err.remove();
+    }
+  }
+
+  function showAppScreen() {
+    tokenScreen.style.display = "none";
+    appScreen.style.display = "block";
+  }
+
+  function humanBytes(n) {
+    if (!n || n <= 0) return "0 B";
+    var units = ["B", "KB", "MB", "GB", "TB"];
+    var i = 0;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    return (i === 0 ? n.toFixed(0) : n.toFixed(1)) + " " + units[i];
+  }
+
+  function humanUptime(secs) {
+    secs = Math.floor(secs || 0);
+    var d = Math.floor(secs / 86400); secs -= d * 86400;
+    var h = Math.floor(secs / 3600); secs -= h * 3600;
+    var m = Math.floor(secs / 60);
+    var parts = [];
+    if (d) parts.push(d + "d");
+    if (h || d) parts.push(h + "h");
+    parts.push(m + "m");
+    return parts.join(" ");
+  }
+
+  function pctLabel(p) { return (p || 0).toFixed(1) + "%"; }
+
+  function barClass(pct) {
+    if (pct >= 90) return "hot";
+    if (pct >= 70) return "warn";
+    return "";
+  }
+
+  function setBar(barEl, pct) {
+    pct = Math.max(0, Math.min(100, pct || 0));
+    barEl.style.width = pct + "%";
+    barEl.className = barClass(pct);
+  }
+
+  function shortID(id) {
+    return id.length > 10 ? id.slice(0, 10) : id;
+  }
+
+  function render(data) {
+    var host = data.host || {};
+    var machines = data.machines || [];
+
+    document.getElementById("host-cpu-label").textContent = pctLabel(host.cpu_pct);
+    setBar(document.getElementById("host-cpu-bar"), host.cpu_pct);
+
+    var memPct = host.mem_total_bytes ? (host.mem_used_bytes / host.mem_total_bytes) * 100 : 0;
+    document.getElementById("host-mem-label").textContent =
+      humanBytes(host.mem_used_bytes) + " / " + humanBytes(host.mem_total_bytes);
+    setBar(document.getElementById("host-mem-bar"), memPct);
+
+    var diskPct = host.disk_total_bytes ? (host.disk_used_bytes / host.disk_total_bytes) * 100 : 0;
+    document.getElementById("host-disk-label").textContent =
+      humanBytes(host.disk_used_bytes) + " / " + humanBytes(host.disk_total_bytes);
+    setBar(document.getElementById("host-disk-bar"), diskPct);
+
+    document.getElementById("fact-load1").textContent = (host.load1 || 0).toFixed(2);
+    document.getElementById("fact-uptime").textContent = humanUptime(host.uptime_secs);
+    document.getElementById("fact-vmcount").textContent = host.vm_count || 0;
+
+    var body = document.getElementById("machines-body");
+    var empty = document.getElementById("machines-empty");
+    body.innerHTML = "";
+    if (machines.length === 0) {
+      empty.style.display = "block";
+    } else {
+      empty.style.display = "none";
+      machines.forEach(function (m) {
+        var tr = document.createElement("tr");
+        tr.innerHTML =
+          "<td>" + escapeHTML(m.app) + "</td>" +
+          "<td class=\"mono\">" + escapeHTML(shortID(m.id)) + "</td>" +
+          "<td class=\"mono\">" + escapeHTML(m.ip) + "</td>" +
+          "<td>" + pctLabel(m.cpu_pct) + "</td>" +
+          "<td>" + humanBytes(m.mem_bytes) + "</td>";
+        body.appendChild(tr);
+      });
+    }
+  }
+
+  function escapeHTML(s) {
+    var d = document.createElement("div");
+    d.textContent = s == null ? "" : String(s);
+    return d.innerHTML;
+  }
+
+  function showError(msg) {
+    errorBox.textContent = msg;
+    errorBox.style.display = "block";
+    statusDot.classList.add("stale");
+  }
+
+  function clearError() {
+    errorBox.style.display = "none";
+    statusDot.classList.remove("stale");
+  }
+
+  function poll() {
+    var token = localStorage.getItem(TOKEN_KEY);
+    if (!token) { showTokenScreen(); return; }
+
+    fetch("/metrics", { headers: { "Authorization": "Bearer " + token } })
+      .then(function (resp) {
+        if (resp.status === 401) {
+          localStorage.removeItem(TOKEN_KEY);
+          showTokenScreen("That token was rejected. Enter a valid one.");
+          throw new Error("unauthorized");
+        }
+        if (!resp.ok) {
+          throw new Error("metrics request failed: " + resp.status);
+        }
+        return resp.json();
+      })
+      .then(function (data) {
+        clearError();
+        render(data);
+        pollTimer = setTimeout(poll, POLL_MS);
+      })
+      .catch(function (err) {
+        if (err.message !== "unauthorized") {
+          showError("Couldn't reach oakd: " + err.message);
+          pollTimer = setTimeout(poll, POLL_MS);
+        }
+      });
+  }
+
+  tokenForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var v = tokenInput.value.trim();
+    if (!v) return;
+    localStorage.setItem(TOKEN_KEY, v);
+    tokenInput.value = "";
+    showAppScreen();
+    poll();
+  });
+
+  if (localStorage.getItem(TOKEN_KEY)) {
+    showAppScreen();
+    poll();
+  } else {
+    showTokenScreen();
+  }
+})();
+</script>
+</body>
+</html>

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"crypto/subtle"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,9 +15,13 @@ import (
 	"time"
 
 	"github.com/iagocavalcante/oakberryio/internal/appconfig"
+	"github.com/iagocavalcante/oakberryio/internal/metrics"
 	"github.com/iagocavalcante/oakberryio/internal/secrets"
 	"github.com/iagocavalcante/oakberryio/internal/store"
 )
+
+//go:embed dashboard.html
+var dashboardHTML []byte
 
 // API wires oakd's HTTP surface: deploy, machine listing, logs, secrets,
 // volumes and app listing. The same Mux is served on both the trusted unix
@@ -25,6 +30,11 @@ type API struct {
 	Deployer *Deployer
 	Store    *store.Store
 	Token    string // bearer token required on the TCP listener; unix socket is trusted local access
+
+	// Metrics holds the latest host/VM resource-usage snapshot, published
+	// by the daemon's periodic sampling goroutine (see daemon.go's Run and
+	// sampleMetrics) and read by handleMetrics.
+	Metrics *metricsHolder
 }
 
 // Mux builds the http.ServeMux shared by both listeners.
@@ -43,13 +53,25 @@ func (a *API) Mux() *http.ServeMux {
 	mux.HandleFunc("POST /apps/{name}/volumes", a.handleCreateVolume)
 	mux.HandleFunc("POST /apps/{name}/ssh", a.handleSSH)
 	mux.HandleFunc("GET /apps", a.handleApps)
+	mux.HandleFunc("GET /metrics", a.handleMetrics)
+	mux.HandleFunc("GET /dashboard", a.handleDashboard)
 	return mux
 }
 
 // AuthMiddleware wraps next with a bearer-token check against a.Token. It's
 // applied only to the TCP listener; the unix socket is served bare.
+//
+// GET /dashboard is exempt: it's a plain browser navigation (typing/
+// clicking a URL), which can't attach an Authorization header, and the page
+// itself carries no data -- only inline JS that calls GET /metrics with a
+// bearer token it holds in localStorage. That real data endpoint stays
+// behind this same check.
 func (a *API) AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/dashboard" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if !ok || subtle.ConstantTimeCompare([]byte(token), []byte(a.Token)) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -584,4 +606,61 @@ func (a *API) handleApps(w http.ResponseWriter, r *http.Request) {
 	sort.Strings(apps)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(apps)
+}
+
+// metricsMachine is one running microVM's identity (from the store) joined
+// with its latest sampled resource usage, as returned by GET /metrics.
+type metricsMachine struct {
+	ID       string  `json:"id"`
+	App      string  `json:"app"`
+	IP       string  `json:"ip"`
+	PID      int64   `json:"pid"`
+	State    string  `json:"state"`
+	CPUPct   float64 `json:"cpu_pct"`
+	MemBytes uint64  `json:"mem_bytes"`
+}
+
+// handleMetrics returns the latest host/VM resource-usage snapshot (see
+// docs/plans/2026-09-15-control-panel-design.md), joining the store's
+// current running machines with the daemon's background sampler output.
+// A machine the sampler hasn't published metrics for yet (e.g. it started
+// after the last sample tick) simply reports zero.
+func (a *API) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	machines, err := a.Store.RunningMachines()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	snap := a.Metrics.get()
+
+	out := struct {
+		Host     metrics.HostMetrics `json:"host"`
+		Machines []metricsMachine    `json:"machines"`
+	}{
+		Host:     snap.Host,
+		Machines: make([]metricsMachine, 0, len(machines)),
+	}
+	for _, m := range machines {
+		mm := snap.Machines[m.ID]
+		out.Machines = append(out.Machines, metricsMachine{
+			ID:       m.ID,
+			App:      m.App,
+			IP:       m.IP,
+			PID:      m.PID,
+			State:    m.State,
+			CPUPct:   mm.CPUPct,
+			MemBytes: mm.MemBytes,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+// handleDashboard serves the control panel's single embedded HTML page. It
+// is deliberately exempt from AuthMiddleware -- see that function's doc
+// comment.
+func (a *API) handleDashboard(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(dashboardHTML)
 }
