@@ -88,7 +88,7 @@ tunnel_id = "uuid"
 tunnel_config = "/etc/cloudflared/config.yml"
 tunnel_creds = "/root/.cloudflared/uuid.json"
 key_file = "/etc/oak/key"
-socket = "/run/oak.sock"
+socket = "/run/oak/oak.sock"
 log_dir = "/var/log/oak"
 # api_token is required on every request to oakd's TCP listener
 # (127.0.0.1:api_port, tunneled as oak.<domain>) as "Authorization: Bearer

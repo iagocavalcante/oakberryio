@@ -17,7 +17,7 @@ import (
 )
 
 // Transport is oak's HTTP client to oakd. With OAK_API unset, it dials the
-// unix socket at OAK_SOCKET (default /run/oak.sock) -- trusted local access,
+// unix socket at OAK_SOCKET (default /run/oak/oak.sock) -- trusted local access,
 // no token needed. With OAK_API set, it speaks HTTPS to that base URL and
 // attaches a bearer token from OAK_TOKEN or ~/.oak/token, matching the
 // tunneled listener's AuthMiddleware (internal/daemon/api.go).
@@ -43,7 +43,7 @@ func NewTransport() (*Transport, error) {
 
 	socket := os.Getenv("OAK_SOCKET")
 	if socket == "" {
-		socket = "/run/oak.sock"
+		socket = "/run/oak/oak.sock"
 	}
 	client := &http.Client{
 		Transport: &http.Transport{

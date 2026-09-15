@@ -97,7 +97,14 @@ func (c *Config) applyDefaults() {
 		c.APIPort = 7000
 	}
 	if c.Socket == "" {
-		c.Socket = "/run/oak.sock"
+		// A dedicated directory (not bare /run/oak.sock) so consumers that
+		// bind-mount the socket into a container -- oak-panel -- can mount
+		// the *directory* and survive an oakd restart. listenUnix removes and
+		// recreates the socket file on every start (new inode); a file
+		// bind-mount would pin the stale inode, but a directory mount always
+		// resolves the current socket. The directory itself persists across
+		// restarts (listenUnix only removes the socket file within it).
+		c.Socket = "/run/oak/oak.sock"
 	}
 	if c.Registry == "" {
 		c.Registry = "localhost:5000"
@@ -431,6 +438,12 @@ func (d *Daemon) sampleMetrics(ctx context.Context) {
 }
 
 func listenUnix(path string) (net.Listener, error) {
+	// Ensure the socket's directory exists and persists across restarts; a
+	// container bind-mounting that directory (oak-panel) depends on it
+	// staying put while only the socket file inside is recreated.
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return nil, fmt.Errorf("mkdir socket dir %s: %w", filepath.Dir(path), err)
+	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("remove stale socket %s: %w", path, err)
 	}
