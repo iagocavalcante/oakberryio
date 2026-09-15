@@ -58,6 +58,13 @@ archives:
     files:
       - LICENSE
       - README.md
+      # box.sh (served at oakberryio.<domain>/box.sh) installs from these:
+      - scripts/host-setup.sh
+      - scripts/backup.sh
+      - deploy/oakd.service
+      - deploy/oak-backup.service
+      - deploy/oak-backup.timer
+      - deploy/oak-docker-forward.service
 
 checksum:
   name_template: checksums.txt

@@ -320,22 +320,22 @@
         <p class="eyebrow">How it works</p>
         <h2 class="gradient-text">Deploy in three steps.</h2>
         <ol class="steps">
-          <li><span class="n">1</span><span>Install the CLI on your laptop.</span></li>
-          <li><span class="n">2</span><span>Bring up a Linux box once with the bootstrap script.</span></li>
+          <li><span class="n">1</span><span>Turn a fresh Ubuntu Server into a box with one command.</span></li>
+          <li><span class="n">2</span><span>Install the CLI on your laptop.</span></li>
           <li><span class="n">3</span><span>Run <code>oak deploy</code> from any app with an <code>oak.toml</code>.</span></li>
         </ol>
         <p class="muted">That's the whole loop. Build, boot, health-check, cut over — zero downtime, every deploy.</p>
       </div>
       <div class="split-art">
         <div class="code" style="width:100%">
-<span class="c"># install the CLI</span><br>
+<span class="c"># 1. on a fresh Ubuntu Server box</span><br>
+curl -fsSL oakberryio.iagocavalcante.com/box.sh \<br>
+&nbsp;&nbsp;| sudo OAK_DOMAIN=apps.example.com bash<br><br>
+<span class="c"># 2. install the CLI on your laptop</span><br>
 curl -fsSL oakberryio.iagocavalcante.com/install.sh | sh<br><br>
-<span class="c"># from your app directory</span><br>
+<span class="c"># 3. from your app directory</span><br>
 <span class="p">oak</span> deploy<br>
-<span class="c">building rootfs...</span><br>
-<span class="c">starting machine...</span><br>
-<span class="c">waiting for health check...</span><br>
-<span class="g">ok</span> hello  <span class="c">→ hello.your-domain.com</span>
+<span class="g">ok</span> hello  <span class="c">→ hello.apps.example.com</span>
         </div>
       </div>
     </div>

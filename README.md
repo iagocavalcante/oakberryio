@@ -57,7 +57,20 @@ A machine to run your apps on:
 - Docker (for building images and the local registry), and a Cloudflare account
   with a domain, for the tunnel.
 
-Bring the box up with the bootstrap script and the host guide:
+Turn a fresh Ubuntu Server into an oak box with one command. It downloads the
+versioned release (checksum-verified), installs oakd and its units, generates a
+unique API token for that box, runs the host bootstrap, and starts oakd:
+
+```sh
+curl -fsSL https://oakberryio.iagocavalcante.com/box.sh | sudo OAK_DOMAIN=apps.example.com bash
+```
+
+It leaves one step: connecting the Cloudflare Tunnel (`cloudflared tunnel login`,
+create a tunnel, set its id in `/etc/oak/oakd.toml`, add the wildcard DNS record,
+restart oakd) — the script prints exactly what to run. x86_64 only for now (the
+guest kernel oak downloads is x86_64).
+
+To do it by hand instead, run the bootstrap directly from a clone:
 
 ```sh
 OAK_DOMAIN=apps.example.com ./scripts/host-setup.sh

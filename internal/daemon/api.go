@@ -29,6 +29,9 @@ var landingHTML []byte
 //go:embed install.sh
 var installSH []byte
 
+//go:embed box.sh
+var boxSH []byte
+
 // API wires oakd's HTTP surface: deploy, machine listing, logs, secrets,
 // volumes and app listing. The same Mux is served on both the trusted unix
 // socket and the bearer-token-guarded TCP listener; see daemon.go.
@@ -63,7 +66,17 @@ func (a *API) Mux() *http.ServeMux {
 	mux.HandleFunc("GET /dashboard", a.handleDashboard)
 	mux.HandleFunc("GET /{$}", a.handleLanding)
 	mux.HandleFunc("GET /install.sh", a.handleInstallScript)
+	mux.HandleFunc("GET /box.sh", a.handleBoxScript)
 	return mux
+}
+
+// handleBoxScript serves the box bootstrap at oakberryio.<domain>/box.sh so
+// `curl -fsSL oakberryio.<domain>/box.sh | sudo OAK_DOMAIN=... bash` turns a
+// fresh Ubuntu Server into an oak box. Public (carries no data), exempt from
+// AuthMiddleware; it pulls the versioned release from GitHub.
+func (a *API) handleBoxScript(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
+	_, _ = w.Write(boxSH)
 }
 
 // handleInstallScript serves the CLI installer at oakberryio.<domain>/install.sh
@@ -94,7 +107,7 @@ func (a *API) handleLanding(w http.ResponseWriter, r *http.Request) {
 // behind this same check.
 func (a *API) AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && (r.URL.Path == "/dashboard" || r.URL.Path == "/" || r.URL.Path == "/install.sh") {
+		if r.Method == http.MethodGet && (r.URL.Path == "/dashboard" || r.URL.Path == "/" || r.URL.Path == "/install.sh" || r.URL.Path == "/box.sh") {
 			next.ServeHTTP(w, r)
 			return
 		}
