@@ -36,7 +36,7 @@ guest init) run on a Linux box with KVM.
 **Prebuilt binary** (macOS/Linux, amd64/arm64):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/iagocavalcante/oakberryio/main/scripts/install.sh | sh
+curl -fsSL https://oakberryio.iagocavalcante.com/install.sh | sh
 ```
 
 **With Go:**

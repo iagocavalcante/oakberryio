@@ -1,7 +1,7 @@
 #!/bin/sh
 # Installs the oak CLI from GitHub releases.
 #
-#   curl -fsSL https://raw.githubusercontent.com/iagocavalcante/oakberryio/main/scripts/install.sh | sh
+#   curl -fsSL https://oakberryio.iagocavalcante.com/install.sh | sh
 #
 # Env overrides:
 #   OAK_VERSION       release tag to install, e.g. "v1.2.3" (default: latest)

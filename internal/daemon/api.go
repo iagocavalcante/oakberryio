@@ -26,6 +26,9 @@ var dashboardHTML []byte
 //go:embed landing.html
 var landingHTML []byte
 
+//go:embed install.sh
+var installSH []byte
+
 // API wires oakd's HTTP surface: deploy, machine listing, logs, secrets,
 // volumes and app listing. The same Mux is served on both the trusted unix
 // socket and the bearer-token-guarded TCP listener; see daemon.go.
@@ -59,7 +62,17 @@ func (a *API) Mux() *http.ServeMux {
 	mux.HandleFunc("GET /metrics", a.handleMetrics)
 	mux.HandleFunc("GET /dashboard", a.handleDashboard)
 	mux.HandleFunc("GET /{$}", a.handleLanding)
+	mux.HandleFunc("GET /install.sh", a.handleInstallScript)
 	return mux
+}
+
+// handleInstallScript serves the CLI installer at oakberryio.<domain>/install.sh
+// so `curl -fsSL oakberryio.<domain>/install.sh | sh` works. Public (carries no
+// data), so it's exempt from AuthMiddleware. The script itself pulls the oak
+// binary from GitHub releases.
+func (a *API) handleInstallScript(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
+	_, _ = w.Write(installSH)
 }
 
 // handleLanding serves the public project landing page at the root of the
@@ -81,7 +94,7 @@ func (a *API) handleLanding(w http.ResponseWriter, r *http.Request) {
 // behind this same check.
 func (a *API) AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && (r.URL.Path == "/dashboard" || r.URL.Path == "/") {
+		if r.Method == http.MethodGet && (r.URL.Path == "/dashboard" || r.URL.Path == "/" || r.URL.Path == "/install.sh") {
 			next.ServeHTTP(w, r)
 			return
 		}
