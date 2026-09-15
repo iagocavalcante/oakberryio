@@ -354,7 +354,22 @@ func (d *Deployer) runReleaseCommand(ctx context.Context, cfg *appconfig.Config,
 			cfg.Deploy.ReleaseCommand, err, logPath, readLastLines(logPath, 50))
 	}
 
-	status, ok := lastChildExitStatus(logPath)
+	// handle.Wait returns when the VMM process exits, which can be marginally
+	// before Firecracker's final flush of the guest serial console to the log
+	// file -- so oak-init's "child-exit status=N" line (the last thing the
+	// guest prints) may not be on disk yet the instant Wait returns. Poll the
+	// log briefly for the marker rather than reading once and racing that
+	// flush; a genuinely crashed guest never wrote it and we fall through to
+	// the error after the short deadline.
+	var status int
+	var ok bool
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if status, ok = lastChildExitStatus(logPath); ok || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 	if !ok {
 		return fmt.Errorf("release command %q: no exit status found (guest may have crashed before oak-init could report one)\n--- last 50 lines of %s ---\n%s",
 			cfg.Deploy.ReleaseCommand, logPath, readLastLines(logPath, 50))
