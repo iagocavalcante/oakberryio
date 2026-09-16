@@ -56,7 +56,7 @@ Docker + per-project cloudflared tunnels). Target: oak (`192.168.1.8`, 16 cores 
 | 6 | agendare.iagocavalcante.com | agendare app + pg18 + own tunnel | `agendare`, `agendare-db` | tron `~/agendare/server` | **DONE 2026-09-16** — 24 tables restored, tron stack stopped. |
 | 7 | leaftok-api.iagocavalcante.com | leaftok-api (Elixir, host net) + pg17 | `leaftok-api`, `leaftok-db` | GH `LeafTok/api` | **DONE 2026-09-16** — 12 tables restored; CI deploys via `oak deploy --remote`; tron containers stopped, runner disabled. Needed oak-init HOME fix + CLI v0.1.2–v0.1.4. |
 | 8 | agendflow.com.br / www / api. | agendflow-client (nginx) + agendflow-api (Supabase DB, no data to move) | `agendflow-client`, `agendflow-api` | GH `Agendflow/*` | **STAGING** on oak with domains; CI not yet switched. **DNS switch pending Cloudflare token** (agendflow.com.br zone). |
-| 9 | api.misesnag.app, admin.misesnag.app | misesnag-api, misesnag-admin, misesnag-db (14 MB) + `misesnag-tunnel` user unit + daily blog cron | `misesnag-api`, `misesnag-admin`, `misesnag-db` | tron `~/apps/misesnag` @ c67cdd6 | **STAGING** on oak. Off-site backup (`scripts/backup-db.sh`, rclone+age) must be ported to the oak box before cutover. **DNS switch pending Cloudflare token** (misesnag.app zone). |
+| 9 | api.misesnag.app, admin.misesnag.app | misesnag-api, misesnag-admin, misesnag-db (14 MB, 36 tables) + `misesnag-tunnel` user unit + daily blog cron | `misesnag-api`, `misesnag-admin`, `misesnag-db` | tron `~/apps/misesnag` @ c67cdd6 | **STAGED & VERIFIED** on oak (`misesnag-api.iagocavalcante.com`, `misesnag-admin.…`). Data restored, readiness 200. **DNS switch pending Cloudflare token** (misesnag.app zone). |
 | 10 | (none yet) nutrafluxo | api + ai + pg16 (40 MB), nightly backup cron | `nutrafluxo-api`, `nutrafluxo-ai`, `nutrafluxo-db` | Mac `nutrafluxo` | only if it should be public again |
 
 Each step: write `oak.toml` in the app repo → `oak deploy` → verify on
@@ -74,6 +74,52 @@ on tron (its cert.pem covers only the iagocavalcante.com zone). Other zones
 token with DNS edit; two junk records
 `trainergymai.app.iagocavalcante.com` / `www.trainergymai.app.iagocavalcante.com`
 were created by mistake and need deleting with that token too.
+
+## Findings that outlived the migration
+
+- **`oak` gaps fixed along the way** (all released): `oak-init` now seeds
+  `HOME` like Docker does (v0.1.2 — leaftok-api's Python runtime crashed
+  without it); `oak deploy --remote` ships the Dockerfile even when
+  `.dockerignore` lists it and honours allowlist-style exceptions
+  (v0.1.2/v0.1.4); `ok <machine-id>` is emitted *before* the cloudflared
+  restart and the CLI treats a stream reset after it as success (v0.1.3 —
+  every CI deploy failed otherwise); `install.sh` resolves the latest release
+  through github.com's redirect rather than `api.github.com`, whose 60/hour
+  unauthenticated budget shared CI IPs exhaust.
+- **Remote build contexts must be lean.** The tunnel rejects a body over
+  ~100 MB with a Cloudflare 413. trainer-gym-ai's monorepo needed an
+  allowlist `.dockerignore`; expect the same for any other monorepo.
+- **A rootfs is image size + 256 MB.** Anything that writes real data needs a
+  volume. `misesnag-api` writes whole videos through `os.tmpdir()`, so it
+  mounts a 20 GB `scratch` volume with `TMPDIR=/scratch`. Its readiness check
+  still `statfs('/')`, so it reports `disk usage is 91%` (the rootfs) forever
+  — cosmetic today, but the honest fix is for that check to measure the
+  filesystem the app writes to.
+- **misesnag's off-site backup is not running and has not been since
+  2026-08-25**, on tron, before any of this. `scripts/backup-db.sh` has no
+  crontab entry there; the newest dump in `~/backups/misesnag` is from
+  2026-08-25 and the API's readiness has been warning
+  "offsite backup heartbeat file is missing" on tron too. Porting it to oak
+  means resolving the DB machine's IP (it changes per deploy: ask oakd's
+  resolver at `10.200.0.1` for `misesnag-db.internal`) and running `pg_dump`
+  from a throwaway container. Worth doing, but it is a pre-existing gap, not
+  something the migration broke.
+- oak's own `oak-backup.timer` snapshots `oak.db` and every volume image
+  nightly to `/var/lib/oak/backups`, 7-day retention, **on the same box**.
+  That is not an off-site backup for any app that needs one.
+
+## Still on tron, by decision or by dependency
+
+Running there now: the media stack, minecraft, age-of-amazon, the pigeon
+`deploy-*` dev stack, nutrafluxo (api + ai + pg, not publicly routed since
+the `dev-end` tunnel died; decide separately whether it moves), and the four
+staged-but-not-cut-over production containers (`agendflow-api`,
+`agendflow-client`, `misesnag-*`, `trainer-gym-landing`) which keep serving
+until their DNS moves.
+
+Cron still on tron: `docker-cache-prune.sh`, `misesnag-daily-blog.sh` (git +
+OpenAI + docker, independent of where the app runs), and nutrafluxo's DB
+backup.
 
 ## After all steps
 
