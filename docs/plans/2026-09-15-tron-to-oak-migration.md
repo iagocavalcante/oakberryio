@@ -104,6 +104,13 @@ were created by mistake and need deleting with that token too.
   resolver at `10.200.0.1` for `misesnag-db.internal`) and running `pg_dump`
   from a throwaway container. Worth doing, but it is a pre-existing gap, not
   something the migration broke.
+- **Every deploy blips every app.** `internal/tunnel` applies ingress by
+  restarting cloudflared, so all 24 apps on the box drop connections for a
+  second or two on any deploy (a CI deploy mid-verification made every
+  unrelated host return Cloudflare 530 for ~15s). Harmless at one app, worth
+  fixing now that the whole estate shares one tunnel; the upgrade path the
+  code already names is Cloudflare's remote-managed tunnel config API, which
+  needs the same API token the DNS cutover is waiting on.
 - oak's own `oak-backup.timer` snapshots `oak.db` and every volume image
   nightly to `/var/lib/oak/backups`, 7-day retention, **on the same box**.
   That is not an off-site backup for any app that needs one.
