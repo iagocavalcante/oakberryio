@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/moby/patternmatcher"
 	"github.com/moby/patternmatcher/ignorefile"
@@ -80,10 +81,18 @@ func tarContext(root, dockerfile string) (*bytes.Buffer, error) {
 			return fmt.Errorf("match %s against .dockerignore: %w", relSlash, err)
 		}
 		if match {
-			if d.IsDir() {
-				return fs.SkipDir
+			if !d.IsDir() {
+				return nil
 			}
-			return nil
+			// An ignored directory is still walked when an exception
+			// pattern ("!apps/landing" under a blanket "*") names
+			// something beneath it; only its own entry is dropped. This is
+			// `docker build`'s rule too, and an allowlist-style
+			// .dockerignore depends on it.
+			if exceptionBelow(pm, relSlash) {
+				return nil
+			}
+			return fs.SkipDir
 		}
 
 		return tarEntry(tw, p, relSlash, d)
@@ -95,6 +104,22 @@ func tarContext(root, dockerfile string) (*bytes.Buffer, error) {
 		return nil, fmt.Errorf("close tar writer: %w", err)
 	}
 	return &buf, nil
+}
+
+// exceptionBelow reports whether any exclusion pattern in pm ("!...") could
+// match a path under dir, so the walk must descend into an otherwise
+// ignored directory. Mirrors moby's archive.TarWithOptions.
+func exceptionBelow(pm *patternmatcher.PatternMatcher, dir string) bool {
+	if !pm.Exclusions() {
+		return false
+	}
+	prefix := dir + "/"
+	for _, pat := range pm.Patterns() {
+		if pat.Exclusion() && strings.HasPrefix(pat.String()+"/", prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // tarEntry writes one file, directory, or symlink into tw. name is p's

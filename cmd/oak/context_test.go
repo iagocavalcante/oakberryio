@@ -103,3 +103,37 @@ func TestTarContextAlwaysIncludesDockerfile(t *testing.T) {
 		t.Errorf("tar contains other.txt, want it excluded: %v", names)
 	}
 }
+
+func TestTarContextAllowlistDescendsForExceptions(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "Dockerfile"), "FROM scratch")
+	writeFile(t, filepath.Join(dir, "package.json"), "{}")
+	if err := os.MkdirAll(filepath.Join(dir, "apps", "landing", "src"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "apps", "mobile"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "apps", "landing", "package.json"), "{}")
+	writeFile(t, filepath.Join(dir, "apps", "landing", "src", "index.ts"), "")
+	writeFile(t, filepath.Join(dir, "apps", "mobile", "big.bin"), "x")
+	writeFile(t, filepath.Join(dir, "README.md"), "x")
+	// Allowlist style: ignore everything, re-include what the build needs.
+	writeFile(t, filepath.Join(dir, ".dockerignore"), "*\n!package.json\n!apps/landing\n")
+
+	buf, err := tarContext(dir, "Dockerfile")
+	if err != nil {
+		t.Fatalf("tarContext: %v", err)
+	}
+	names := tarNames(t, buf.Bytes())
+	for _, want := range []string{"Dockerfile", "package.json", "apps/landing/package.json", "apps/landing/src/index.ts"} {
+		if !names[want] {
+			t.Errorf("tar missing %s: %v", want, names)
+		}
+	}
+	for _, skip := range []string{"README.md", "apps/mobile/big.bin", "apps/mobile/"} {
+		if names[skip] {
+			t.Errorf("tar contains %s, want it excluded: %v", skip, names)
+		}
+	}
+}
