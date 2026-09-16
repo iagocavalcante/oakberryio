@@ -82,7 +82,12 @@ minutes after a manual power-on, with no shutdown sequence, panic, OOM or
 thermal line in the journal — it simply stops. tron, in the same house, was
 unaffected. **Rolled back on 2026-09-16:** misesnag (apex and admin) and trainergymai
 (apex and www) were pointed back at tron's tunnels in the Cloudflare
-dashboard, and trainer-gym's CI was reverted to the tron self-hosted runner.
+dashboard, and trainer-gym's CI was reverted to the tron self-hosted runner. The rollback
+initially served a stale misesnag web build (tron's copy was from
+2026-09-10; oak had served `main`), so the web container on tron was rebuilt
+from `main` @ `aad642e` using a new release overlay. Nothing redeploys it from
+main automatically, so new blog posts merged to main need that release step
+repeated.
 Their oak copies stay staged but take no traffic. agendflow was never moved.
 fitlock was rolled back the same way. oakberryio.iagocavalcante.com now fails
 over to a static copy on tron (landing, `install.sh`, `box.sh` only) behind a
