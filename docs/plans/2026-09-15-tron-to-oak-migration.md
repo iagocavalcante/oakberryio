@@ -49,20 +49,31 @@ Docker + per-project cloudflared tunnels). Target: oak (`192.168.1.8`, 16 cores 
 | # | Public host | tron pieces | oak apps | Source | Deploy path today |
 |---|---|---|---|---|---|
 | 1 | fitlock.iagocavalcante.com | nginx static (`~/apps/fitlock`) | `fitlock` | Mac `fitlock/web` | **DONE 2026-09-15** — live on oak, tron container stopped, ingress line removed (media tunnel restart pending sudo) |
-| 2 | trainergymai.app / www | trainer-gym-landing | `trainer-gym-landing` | GH `iagocavalcante/trainer-gym-ai` | runner on tron |
-| 3 | prospects.iagocavalcante.com | prospecting nginx + prospector api + outreach + pgvector pg17 | `prospects-web`, `prospector`, `outreach`, `prospector-db` (pgvector image, volume) | Mac `prospector` + tron `~/prospecting` | manual; cron backup on tron |
-| 4 | beatduel.iagocavalcante.com | beatduel-relay + own tunnel + watchdog cron | `beatduel-relay` | tron `~/Workspaces/beatduel-relay` | manual |
-| 5 | oakberry.iagocavalcante.com | oakberry (Elixir) + pg16 + uploads volume + own tunnel | `oakberry`, `oakberry-db` | Mac `oakberry` | manual |
-| 6 | agendare.iagocavalcante.com | agendare app + pg18 + own tunnel | `agendare`, `agendare-db` | Mac `agendare` | manual |
-| 7 | leaftok-api.iagocavalcante.com | leaftok-api (Elixir, host net) + pg17 | `leaftok-api`, `leaftok-db` | GH `LeafTok/api` | runner on tron |
-| 8 | agendflow.com.br / www / api. | agendflow-client (nginx) + agendflow-api | `agendflow-client`, `agendflow-api` (+ DB? check api env) | GH `Agendflow/*` | 2 runners on tron |
-| 9 | api.misesnag.app, admin.misesnag.app | misesnag-api, misesnag-admin, misesnag-db (35 MB) + `misesnag-tunnel` user unit + daily blog cron | `misesnag-api`, `misesnag-admin`, `misesnag-db`; repoint the existing `misesnag` web at `misesnag-api.internal` | tron `~/apps/misesnag*` | manual, several release dirs |
+| 2 | trainergymai.app / www | trainer-gym-landing | `trainer-gym-landing` | GH `iagocavalcante/trainer-gym-ai` | **STAGED** on oak with domains, CI switched to `oak deploy --remote` (v0.1.4), tron runner disabled. **DNS switch pending Cloudflare token** (trainergymai.app zone). |
+| 3 | prospects.iagocavalcante.com | prospecting nginx + prospector api + outreach + pgvector pg17 | `prospects`, `prospector`, `outreach`, `prospector-db` | tron `~/prospector-build` (deployed copy; Mac repo differs) | **DONE 2026-09-16** — data restored (51 companies/leads), Access verified, tron stopped, backup cron removed. |
+| 4 | beatduel.iagocavalcante.com | beatduel-relay + own tunnel + watchdog cron | `beatduel` | tron `~/Workspaces/beatduel-relay` | **DONE 2026-09-16** — tron container stopped, watchdog cron and tunnel process removed. |
+| 5 | oakberry.iagocavalcante.com | oakberry (Elixir) + pg16 + uploads volume + own tunnel | `oakberry`, `oakberry-db` | tron `~/apps/oakberry` (deployed copy) | **DONE 2026-09-16** — 19 tables restored, migrations ran, uploads volume (was empty), tron stack stopped. |
+| 6 | agendare.iagocavalcante.com | agendare app + pg18 + own tunnel | `agendare`, `agendare-db` | tron `~/agendare/server` | **DONE 2026-09-16** — 24 tables restored, tron stack stopped. |
+| 7 | leaftok-api.iagocavalcante.com | leaftok-api (Elixir, host net) + pg17 | `leaftok-api`, `leaftok-db` | GH `LeafTok/api` | **DONE 2026-09-16** — 12 tables restored; CI deploys via `oak deploy --remote`; tron containers stopped, runner disabled. Needed oak-init HOME fix + CLI v0.1.2–v0.1.4. |
+| 8 | agendflow.com.br / www / api. | agendflow-client (nginx) + agendflow-api (Supabase DB, no data to move) | `agendflow-client`, `agendflow-api` | GH `Agendflow/*` | **STAGING** on oak with domains; CI not yet switched. **DNS switch pending Cloudflare token** (agendflow.com.br zone). |
+| 9 | api.misesnag.app, admin.misesnag.app | misesnag-api, misesnag-admin, misesnag-db (14 MB) + `misesnag-tunnel` user unit + daily blog cron | `misesnag-api`, `misesnag-admin`, `misesnag-db` | tron `~/apps/misesnag` @ c67cdd6 | **STAGING** on oak. Off-site backup (`scripts/backup-db.sh`, rclone+age) must be ported to the oak box before cutover. **DNS switch pending Cloudflare token** (misesnag.app zone). |
 | 10 | (none yet) nutrafluxo | api + ai + pg16 (40 MB), nightly backup cron | `nutrafluxo-api`, `nutrafluxo-ai`, `nutrafluxo-db` | Mac `nutrafluxo` | only if it should be public again |
 
 Each step: write `oak.toml` in the app repo → `oak deploy` → verify on
 `<app>.iagocavalcante.com` (and `.internal` from a sibling VM) → migrate data →
 add `domains` + redeploy → stop tron container → delete tron tunnel ingress
 line / disable its cloudflared unit → move cron jobs.
+
+## DNS: how cutover actually works
+
+oakd does not create DNS records. `*.iagocavalcante.com` is NOT a wildcard
+to the oak tunnel; each host has its own CNAME. Switch a host with
+`cloudflared tunnel --config /dev/null route dns -f b1e1e3ba-e94e-4452-a57e-999457238e19 <host>`
+on tron (its cert.pem covers only the iagocavalcante.com zone). Other zones
+(trainergymai.app, misesnag.app, agendflow.com.br) need a Cloudflare API
+token with DNS edit; two junk records
+`trainergymai.app.iagocavalcante.com` / `www.trainergymai.app.iagocavalcante.com`
+were created by mistake and need deleting with that token too.
 
 ## After all steps
 
