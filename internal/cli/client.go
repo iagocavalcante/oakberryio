@@ -84,13 +84,7 @@ func (c *Client) Deploy(ctx context.Context, app, image, tomlText string, out io
 		fmt.Fprintln(out, line)
 		lastLine = line
 	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("read deploy stream: %w", err)
-	}
-	if strings.HasPrefix(lastLine, "error:") {
-		return fmt.Errorf("%s", lastLine)
-	}
-	return nil
+	return streamOutcome("deploy", lastLine, scanner.Err())
 }
 
 // BuildRemote posts contextTar (a tar of the build context) to oakd's
@@ -198,8 +192,21 @@ func (c *Client) streamProgress(req *http.Request, verb, app string, out io.Writ
 		fmt.Fprintln(out, line)
 		lastLine = line
 	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("read %s stream: %w", verb, err)
+	return streamOutcome(verb, lastLine, scanner.Err())
+}
+
+// streamOutcome turns the last line of a progress stream plus the read
+// error, if any, into the command's result. oakd writes "ok <machine-id>"
+// the moment a deploy/restart/scale has cut over and only then restarts
+// cloudflared, which resets every tunnelled connection -- including this
+// stream when oak talks to the box remotely. So a read error after "ok" is
+// the expected shape of a successful remote deploy, not a failure.
+func streamOutcome(verb, lastLine string, readErr error) error {
+	if strings.HasPrefix(lastLine, "ok ") {
+		return nil
+	}
+	if readErr != nil {
+		return fmt.Errorf("read %s stream: %w", verb, readErr)
 	}
 	if strings.HasPrefix(lastLine, "error:") {
 		return fmt.Errorf("%s", lastLine)

@@ -571,6 +571,14 @@ func (d *Deployer) bootFromRelease(ctx context.Context, cfg *appconfig.Config, r
 		return id, fmt.Errorf("stop previous machines for %s: %w", cfg.App, err)
 	}
 
+	// The machine is healthy and the old ones are gone: this is the outcome
+	// line the CLI keys on (see internal/cli's stream readers), and it must
+	// go out *before* applyTunnel. Applying the ingress restarts cloudflared,
+	// which drops every connection through the tunnel -- including this very
+	// progress stream when the client is remote (`oak deploy` from CI). A
+	// client that has already seen "ok" treats that reset as success.
+	emit(fmt.Sprintf("ok %s\n", id))
+
 	if err := d.applyTunnel(ctx); err != nil {
 		if errors.Is(err, tunnel.ErrRestart) {
 			// The config is on disk; cloudflared just didn't reload it. The

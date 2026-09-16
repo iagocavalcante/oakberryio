@@ -122,8 +122,11 @@ func (a *API) AuthMiddleware(next http.Handler) http.Handler {
 
 // handleDeploy runs a deploy and streams progress lines to the client.
 // Headers can't change once streaming starts, so the response is always
-// 200 OK; the caller must parse the final line ("ok <machine-id>" or
-// "error: <message>") for the real outcome.
+// 200 OK; the caller must parse the stream for the outcome line ("ok
+// <machine-id>", or "error: <message>" as the last line). "ok" is emitted
+// as soon as the new machine is healthy and cut over, before the tunnel
+// restart that follows, so it is not necessarily the last line and the
+// stream may even be reset right after it.
 //
 // The plan's documented body is {"image": "..."}; that alone can't
 // bootstrap a brand new app's first deploy (there's no oak.toml on file
@@ -172,7 +175,10 @@ func (a *API) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	id, err := a.Deployer.Deploy(r.Context(), cfg, body.Image, progress)
+	// Success is signalled by bootFromRelease itself ("ok <machine-id>",
+	// emitted before the tunnel restart that may sever this stream), so the
+	// handlers below only ever add an error or a warning after it.
+	_, err = a.Deployer.Deploy(r.Context(), cfg, body.Image, progress)
 	if err != nil {
 		progress(fmt.Sprintf("error: %v\n", err))
 		return
@@ -182,7 +188,6 @@ func (a *API) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	if err := a.Store.SetAppOwner(name, body.Owner); err != nil {
 		progress(fmt.Sprintf("warning: failed to record owner: %v\n", err))
 	}
-	progress(fmt.Sprintf("ok %s\n", id))
 }
 
 // resolveConfig parses tomlText as this app's oak.toml when given, else
@@ -313,12 +318,11 @@ func (a *API) handleRestart(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	id, err := a.Deployer.Restart(r.Context(), name, progress)
+	_, err := a.Deployer.Restart(r.Context(), name, progress)
 	if err != nil {
 		progress(fmt.Sprintf("error: %v\n", err))
 		return
 	}
-	progress(fmt.Sprintf("ok %s\n", id))
 }
 
 // handleScale resizes app's VM (memory and/or CPU count) and reboots it
@@ -354,12 +358,11 @@ func (a *API) handleScale(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	id, err := a.Deployer.Scale(r.Context(), name, body.MemoryMB, body.CPUs, progress)
+	_, err := a.Deployer.Scale(r.Context(), name, body.MemoryMB, body.CPUs, progress)
 	if err != nil {
 		progress(fmt.Sprintf("error: %v\n", err))
 		return
 	}
-	progress(fmt.Sprintf("ok %s\n", id))
 }
 
 // handleDestroy tears down app entirely: every machine, all its rows, its
