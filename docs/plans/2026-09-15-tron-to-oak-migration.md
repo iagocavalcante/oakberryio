@@ -85,9 +85,12 @@ unaffected. **Rolled back on 2026-09-16:** misesnag (apex and admin) and trainer
 dashboard, and trainer-gym's CI was reverted to the tron self-hosted runner. The rollback
 initially served a stale misesnag web build (tron's copy was from
 2026-09-10; oak had served `main`), so the web container on tron was rebuilt
-from `main` @ `aad642e` using a new release overlay. Nothing redeploys it from
-main automatically, so new blog posts merged to main need that release step
-repeated.
+from `main` @ `aad642e`. The root cause was that misesnag's `web-deploy.yml`
+claimed Dokploy deployed every build, but Dokploy was gone. misesnag PR #131
+adds a deploy job, gated on the build and on `main`, that runs
+`scripts/deploy-web-tron.sh` on a tron self-hosted runner, so every merge to
+main now reaches the live site. When the web moves back to oak, switch that
+job to `oak deploy --remote` or disable it.
 Their oak copies stay staged but take no traffic. agendflow was never moved.
 fitlock was rolled back the same way. oakberryio.iagocavalcante.com now fails
 over to a static copy on tron (landing, `install.sh`, `box.sh` only) behind a
