@@ -118,7 +118,7 @@ func runDeploy(args []string) error {
 	}
 
 	if *remote {
-		contextTar, err := tarContext(".")
+		contextTar, err := tarContext(".", cfg.Build.Dockerfile)
 		if err != nil {
 			return fmt.Errorf("tar build context: %w", err)
 		}

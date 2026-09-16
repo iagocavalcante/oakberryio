@@ -24,12 +24,15 @@ import (
 // the same libraries `docker build` itself uses, so a pattern that excludes
 // a file from a local build excludes it here too. .git and the
 // .dockerignore file itself are always excluded, regardless of what
-// .dockerignore says, matching `docker build`'s own context rules.
+// .dockerignore says, matching `docker build`'s own context rules. The
+// Dockerfile named by dockerfile (relative to root) is always *included* for
+// the same reason: `docker build` sends it even when .dockerignore lists it,
+// and Phoenix's generated .dockerignore does exactly that.
 //
 // The whole tar is built in memory rather than streamed through a pipe;
 // these repos' build contexts are tens of MB (see the design doc's "out of
 // scope" section), so that's simpler and plenty fast.
-func tarContext(root string) (*bytes.Buffer, error) {
+func tarContext(root, dockerfile string) (*bytes.Buffer, error) {
 	var patterns []string
 	f, err := os.Open(filepath.Join(root, ".dockerignore"))
 	switch {
@@ -68,6 +71,9 @@ func tarContext(root string) (*bytes.Buffer, error) {
 		}
 		if relSlash == ".dockerignore" {
 			return nil
+		}
+		if relSlash == filepath.ToSlash(filepath.Clean(dockerfile)) {
+			return tarEntry(tw, p, relSlash, d)
 		}
 		match, err := pm.MatchesOrParentMatches(relSlash)
 		if err != nil {

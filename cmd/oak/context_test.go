@@ -42,7 +42,7 @@ func TestTarContextRespectsDockerignore(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "skip.txt"), "skip")
 	writeFile(t, filepath.Join(dir, ".dockerignore"), "skip.txt\n")
 
-	buf, err := tarContext(dir)
+	buf, err := tarContext(dir, "Dockerfile")
 	if err != nil {
 		t.Fatalf("tarContext: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestTarContextAlwaysExcludesGit(t *testing.T) {
 	}
 	writeFile(t, filepath.Join(dir, ".git", "objects", "blob"), "binary junk")
 
-	buf, err := tarContext(dir)
+	buf, err := tarContext(dir, "Dockerfile")
 	if err != nil {
 		t.Fatalf("tarContext: %v", err)
 	}
@@ -80,5 +80,26 @@ func TestTarContextAlwaysExcludesGit(t *testing.T) {
 	}
 	if !names["app.txt"] {
 		t.Errorf("tar missing app.txt: %v", names)
+	}
+}
+
+func TestTarContextAlwaysIncludesDockerfile(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "Dockerfile"), "FROM scratch")
+	writeFile(t, filepath.Join(dir, "other.txt"), "x")
+	// Phoenix's generated .dockerignore lists the Dockerfile itself; docker
+	// build still sends it, so we must too.
+	writeFile(t, filepath.Join(dir, ".dockerignore"), "Dockerfile\nother.txt\n")
+
+	buf, err := tarContext(dir, "Dockerfile")
+	if err != nil {
+		t.Fatalf("tarContext: %v", err)
+	}
+	names := tarNames(t, buf.Bytes())
+	if !names["Dockerfile"] {
+		t.Errorf("tar missing Dockerfile although .dockerignore lists it: %v", names)
+	}
+	if names["other.txt"] {
+		t.Errorf("tar contains other.txt, want it excluded: %v", names)
 	}
 }
