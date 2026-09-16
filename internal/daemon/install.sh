@@ -67,10 +67,19 @@ if [ -n "${OAK_VERSION:-}" ]; then
 	version="$OAK_VERSION"
 else
 	echo "Resolving latest release..." >&2
-	api_response=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest") \
-		|| fail "could not reach GitHub API to resolve the latest release (set OAK_VERSION to skip this)"
-	version=$(echo "$api_response" | grep '"tag_name"' | head -n1 | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')
-	[ -n "$version" ] || fail "could not parse a release tag from the GitHub API response"
+	# Follow the redirect on /releases/latest rather than asking
+	# api.github.com: the API allows 60 unauthenticated requests per hour per
+	# IP, which CI runners (shared egress IPs) routinely exhaust -- this
+	# installer then failed with a 403 on a GitHub Actions runner. The
+	# redirect is served by github.com itself and carries no such budget.
+	latest_url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest") \
+		|| fail "could not reach github.com to resolve the latest release (set OAK_VERSION to skip this)"
+	version=${latest_url##*/tag/}
+	case "$version" in
+	"" | *'/'*)
+		fail "could not parse a release tag from ${latest_url} (set OAK_VERSION to skip this)"
+		;;
+	esac
 fi
 
 echo "Installing oak ${version} (${os}/${arch})..." >&2
