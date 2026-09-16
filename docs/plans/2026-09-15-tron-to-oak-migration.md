@@ -88,6 +88,14 @@ fitlock was rolled back the same way. oakberryio.iagocavalcante.com now fails
 over to a static copy on tron (landing, `install.sh`, `box.sh` only) behind a
 dedicated tunnel `oakberryio-tron`; it must be re-synced if those files
 change, and pointed back at the oak tunnel once the box is healthy.
+iagocavalcante.com and leaftok-api were rolled back too: the site's tron
+container runs against the old Supabase database, and leaftok's tron
+containers were restarted with its CI reverted to the tron runner. **Their
+databases now diverge from the copies on oak.** Before moving either back,
+copy over the rows written on oak while it was live (leaftok: 2026-09-16
+00:49 to about 01:58 UTC; personal site: from 2026-09-15 14:16 UTC) and
+whatever tron and Supabase gained in the meantime. Do not delete the Supabase
+project until that is done.
 Until the hardware is diagnosed, **do not move any DNS back to oak**. tron's ops monitor now alerts on the box within about
 four minutes.
 
