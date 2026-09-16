@@ -554,7 +554,7 @@ func (d *Deployer) bootFromRelease(ctx context.Context, cfg *appconfig.Config, r
 	if len(cfg.Services) > 0 {
 		emit("waiting for health check...\n")
 	}
-	if err := d.awaitHealthy(ctx, cfg, ip); err != nil {
+	if err := d.awaitHealthy(ctx, cfg, ip, emit); err != nil {
 		_ = handle.Stop(ctx)
 		d.removeHandle(id)
 		_ = d.Store.SetMachineState(id, "failed", 0)
@@ -775,7 +775,13 @@ func (d *Deployer) watchMachine(id string, handle Handle) {
 // awaitHealthy polls Checker.Healthy for up to the configured budget
 // (default 60s, every 1s). An app with no services defined has nothing to
 // check and is considered healthy immediately.
-func (d *Deployer) awaitHealthy(ctx context.Context, cfg *appconfig.Config, ip string) error {
+// awaitHealthy polls the machine's first service until it answers, the
+// budget runs out, or ctx ends. It emits a heartbeat line every
+// healthHeartbeat while waiting: the deploy stream is otherwise silent for
+// the whole boot, and a proxy in front of oakd's TCP listener (the
+// Cloudflare Tunnel, for `oak deploy` from CI) resets an idle response
+// stream after about a minute, even though the deploy itself carries on.
+func (d *Deployer) awaitHealthy(ctx context.Context, cfg *appconfig.Config, ip string, emit func(string)) error {
 	if len(cfg.Services) == 0 {
 		return nil
 	}
@@ -790,7 +796,9 @@ func (d *Deployer) awaitHealthy(ctx context.Context, cfg *appconfig.Config, ip s
 		interval = time.Second
 	}
 
-	deadline := time.Now().Add(timeout)
+	started := time.Now()
+	deadline := started.Add(timeout)
+	nextBeat := started.Add(healthHeartbeat)
 	var lastErr error
 	for {
 		lastErr = d.Checker.Healthy(ctx, ip, svc.InternalPort, svc.Check.Path)
@@ -800,6 +808,10 @@ func (d *Deployer) awaitHealthy(ctx context.Context, cfg *appconfig.Config, ip s
 		if time.Now().After(deadline) {
 			return fmt.Errorf("health check never passed: %w", lastErr)
 		}
+		if now := time.Now(); now.After(nextBeat) {
+			emit(fmt.Sprintf("still waiting for health check (%ds)...\n", int(now.Sub(started).Seconds())))
+			nextBeat = now.Add(healthHeartbeat)
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -807,6 +819,11 @@ func (d *Deployer) awaitHealthy(ctx context.Context, cfg *appconfig.Config, ip s
 		}
 	}
 }
+
+// healthHeartbeat is how often awaitHealthy writes a progress line while a
+// machine is still booting. Well under the ~60s after which the tunnel
+// gives up on a silent stream.
+const healthHeartbeat = 10 * time.Second
 
 // stopOldMachines stops and deletes every other running machine for app.
 // IPs in this design are only ever held by live machine rows, so a stopped
