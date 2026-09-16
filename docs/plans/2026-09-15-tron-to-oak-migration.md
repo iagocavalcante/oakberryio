@@ -75,6 +75,16 @@ token with DNS edit; two junk records
 `trainergymai.app.iagocavalcante.com` / `www.trainergymai.app.iagocavalcante.com`
 were created by mistake and need deleting with that token too.
 
+## Blocked: the box itself is unstable (2026-09-16)
+
+The box powered off abruptly twice within half an hour, the second time ten
+minutes after a manual power-on, with no shutdown sequence, panic, OOM or
+thermal line in the journal — it simply stops. tron, in the same house, was
+unaffected. Until that is diagnosed, **do not move the remaining DNS**:
+misesnag, agendflow and trainer-gym keep serving from tron, and their oak
+copies stay staged. tron's ops monitor now alerts on the box within about
+four minutes.
+
 ## Findings that outlived the migration
 
 - **`oak` gaps fixed along the way** (all released): `oak-init` now seeds
