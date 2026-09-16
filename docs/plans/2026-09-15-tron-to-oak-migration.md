@@ -84,6 +84,10 @@ unaffected. **Rolled back on 2026-09-16:** misesnag (apex and admin) and trainer
 (apex and www) were pointed back at tron's tunnels in the Cloudflare
 dashboard, and trainer-gym's CI was reverted to the tron self-hosted runner.
 Their oak copies stay staged but take no traffic. agendflow was never moved.
+fitlock was rolled back the same way. oakberryio.iagocavalcante.com now fails
+over to a static copy on tron (landing, `install.sh`, `box.sh` only) behind a
+dedicated tunnel `oakberryio-tron`; it must be re-synced if those files
+change, and pointed back at the oak tunnel once the box is healthy.
 Until the hardware is diagnosed, **do not move any DNS back to oak**. tron's ops monitor now alerts on the box within about
 four minutes.
 
