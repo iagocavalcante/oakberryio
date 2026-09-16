@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -395,7 +396,8 @@ func mountVolumes(guest mmds.Guest) error {
 // childEnv sets the process's own PATH (so exec.LookPath can resolve a bare
 // argv[0], see the note below) and returns the environment any child of
 // oak-init should run with: the app's image env plus app-config env and
-// secrets from guest.Env, with PATH seeded as a baseline. Used by runChild
+// secrets from guest.Env, with PATH and HOME seeded as a baseline (see
+// baselineEnv). Used by runChild
 // for the app's own child, and by the ssh agent (agent.go) for shells it
 // spawns over `oak ssh`, so both see identical environments.
 func childEnv(guest mmds.Guest) []string {
@@ -408,12 +410,9 @@ func childEnv(guest mmds.Guest) []string {
 	// seed it into the child's env as a baseline; guest.Env's own PATH, if
 	// the image or app config set one, still wins there via MergeEnv's
 	// override semantics.
-	path := guest.Env["PATH"]
-	if path == "" {
-		path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-	}
-	_ = os.Setenv("PATH", path)
-	return mmds.MergeEnv([]string{"PATH=" + path}, guest.Env)
+	base := baselineEnv(guest.Env)
+	_ = os.Setenv("PATH", strings.TrimPrefix(base[0], "PATH="))
+	return mmds.MergeEnv(base, guest.Env)
 }
 
 // runChild execs argv as a child of PID 1 (not a replacement of it, since
