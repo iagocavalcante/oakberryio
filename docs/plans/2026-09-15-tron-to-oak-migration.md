@@ -96,6 +96,9 @@ copy over the rows written on oak while it was live (leaftok: 2026-09-16
 00:49 to about 01:58 UTC; personal site: from 2026-09-15 14:16 UTC) and
 whatever tron and Supabase gained in the meantime. Do not delete the Supabase
 project until that is done.
+pulsarcode (Patrick's Nuxt staging site; production is on Netlify) runs on
+tron as a snapshot of `design/editorial-gallery` @ `ed7d3f9`, behind the same
+fallback tunnel as oakberryio. Nothing rebuilds it when the branch moves.
 Until the hardware is diagnosed, **do not move any DNS back to oak**. tron's ops monitor now alerts on the box within about
 four minutes.
 
